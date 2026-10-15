@@ -10,7 +10,9 @@ A native Apple Silicon Mac meeting recorder. Capture system audio and an optiona
 
 ## Run
 
-Open `dist/Hushnote.app` (or the installed copy in Applications). Hushnote appears in the Dock while idle or processing; clicking its Dock icon reopens the window. Closing the window keeps the app running. **Option–Command–R** starts/stops recording from anywhere. When recording starts, the window and running-app Dock icon hide; the Dock icon returns when recording stops without reopening the window. A shortcut you have pinned to the Dock, macOS privacy indicators and the menu-bar icon may remain visible; universal invisibility during whole-screen sharing is not promised.
+Download `Hushnote-<version>-AppleSilicon.zip` from the [Releases](https://github.com/royart-dev/Hushnote/releases) page, unzip it, and move `Hushnote.app` to Applications. Builds are ad-hoc signed and not notarized, so macOS blocks the first launch: open **System Settings → Privacy & Security** and choose **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/Hushnote.app`. To build it yourself, see [Build and verify](#build-and-verify); the app is written to `dist/Hushnote.app`.
+
+Hushnote appears in the Dock while idle or processing; clicking its Dock icon reopens the window. Closing the window keeps the app running. **Option–Command–R** starts/stops recording from anywhere. When recording starts, the window and running-app Dock icon hide; the Dock icon returns when recording stops without reopening the window. A shortcut you have pinned to the Dock, macOS privacy indicators and the menu-bar icon may remain visible; universal invisibility during whole-screen sharing is not promised.
 
 1. Open Settings. Download the speech models once if they are not already installed. Optionally install the 1.12 GB summary model. Downloads require internet; meeting processing does not.
 2. Choose a destination folder. Notes are saved at its root. Project names appear in filenames and YAML metadata.
