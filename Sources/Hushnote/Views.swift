@@ -667,6 +667,18 @@ struct SettingsView: View {
                         Spacer()
                         Toggle("Process automatically", isOn: $state.autoProcess).toggleStyle(InstrumentSwitch()).labelsHidden()
                     }
+                    SettingRow("Reminder") {
+                        Text("Remind me when a recording goes quiet").font(.hnBody)
+                        Spacer()
+                        Toggle("Remind me when quiet", isOn: $state.remindWhenQuiet).toggleStyle(InstrumentSwitch()).labelsHidden()
+                    }
+                    SettingRow("Auto-stop") {
+                        Text("Stop by itself after 30 quiet minutes").font(.hnBody)
+                            .foregroundStyle(state.remindWhenQuiet ? HN.ink : HN.muted)
+                        Spacer()
+                        Toggle("Stop automatically", isOn: $state.autoStopWhenQuiet).toggleStyle(InstrumentSwitch()).labelsHidden()
+                            .disabled(!state.remindWhenQuiet)
+                    }
                     SettingRow("Shortcut") {
                         KeyCaps()
                         Text("Start or stop from any app").font(.hnBody).foregroundStyle(HN.ink2)

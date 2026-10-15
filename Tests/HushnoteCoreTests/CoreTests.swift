@@ -23,13 +23,17 @@ final class CoreTests {
         checks.testSpeakerOverlapIsNotAssignedFalseIdentity()
         checks.testHighlightsAreSourceExcerpts()
         checks.testNoteOutlineAcceptsLooseModelMarkdown()
+        checks.testActivityMeterIgnoresChimesAndCountsSpeech()
+        checks.testQuietRecordingIsRemindedThenStopped()
+        checks.testLiveAudioIsNeverStoppedAutomatically()
+        checks.testKeepRecordingSnoozesAndSettingsAreHonoured()
         try checks.testManifestReadsWaitForQueuedWrites()
         try checks.testRingBoundsAndWraparound()
         try await checks.testRouteRecoveryCoalescesAndLeavesOtherTrackRunning()
         try await checks.testRouteRecoveryRetriesUnavailableDevices()
         try await checks.testRouteRecoveryCannotRestartAfterStop()
         checks.testReconnectTimelineAndInterruptionProcessing()
-        print("PASS: session persistence, header-only listing, Markdown/YAML escaping, path containment, speaker overlap, transcript excerpts, note outline, read-after-queued-write, bounded ring, route-switch coalescing, independent tracks, reconnect retries, stop cancellation, timeline continuity and interruption processing")
+        print("PASS: session persistence, header-only listing, Markdown/YAML escaping, path containment, speaker overlap, transcript excerpts, note outline, read-after-queued-write, bounded ring, route-switch coalescing, independent tracks, reconnect retries, activity meter, quiet reminders, stop cancellation, timeline continuity and interruption processing")
     }
     func testSessionRoundTripAndEscapedMarkdown() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -185,6 +189,76 @@ final class CoreTests {
         XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: false, modelsAvailable: true, chunkCount: 238))
         XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: true, modelsAvailable: false, chunkCount: 238))
         XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: true, modelsAvailable: true, chunkCount: 0))
+    }
+
+    func testActivityMeterIgnoresChimesAndCountsSpeech() {
+        let meter = ActivityMeter(startedAt: 100)
+        // A 0.4 s chime is not activity.
+        meter.observe(.system, rms: 0.05, seconds: 0.4, at: 110)
+        XCTAssertEqual(meter.lastActive, 100)
+        // Two seconds of silence forgets the chime, so a second chime does not add to the first.
+        for step in 0..<8 { meter.observe(.system, rms: 0.0005, seconds: 0.25, at: 111 + Double(step) * 0.25) }
+        meter.observe(.system, rms: 0.05, seconds: 0.4, at: 120)
+        XCTAssertEqual(meter.lastActive, 100)
+        // Sustained sound, even in short chunks, counts, and tracks are independent of each other.
+        for step in 0..<6 { meter.observe(.microphone, rms: 0.03, seconds: 0.25, at: 130 + Double(step) * 0.25) }
+        XCTAssertEqual(meter.lastActive, 131.25)
+        meter.reset(at: 500)
+        XCTAssertEqual(meter.lastActive, 500)
+    }
+
+    func testQuietRecordingIsRemindedThenStopped() {
+        var policy = StopReminderPolicy()
+        let on = StopReminderPolicy.Settings()
+        // The meeting ended at 15 minutes and nobody pressed stop.
+        XCTAssertEqual(policy.evaluate(elapsed: 15 * 60 + 500, lastActive: 15 * 60, settings: on), .none)
+        XCTAssertEqual(policy.evaluate(elapsed: 25 * 60, lastActive: 15 * 60, settings: on), .remindQuiet(quiet: 600))
+        XCTAssertTrue(policy.reminderOutstanding)
+        // Reminders are sent once, not repeated every tick.
+        XCTAssertEqual(policy.evaluate(elapsed: 25 * 60 + 2, lastActive: 15 * 60, settings: on), .none)
+        XCTAssertEqual(policy.evaluate(elapsed: 44 * 60, lastActive: 15 * 60, settings: on), .none)
+        XCTAssertEqual(policy.evaluate(elapsed: 45 * 60, lastActive: 15 * 60, settings: on), .autoStop(quiet: 1800, lastActive: 900))
+    }
+
+    func testLiveAudioIsNeverStoppedAutomatically() {
+        var policy = StopReminderPolicy()
+        let on = StopReminderPolicy.Settings()
+        // Audio keeps arriving for 9 hours: no quiet reminder, no auto-stop, only hourly nudges from 2 h.
+        var actions: [StopReminderPolicy.Action] = []
+        var elapsed = 0.0
+        while elapsed < 9 * 3600 {
+            elapsed += 2
+            let action = policy.evaluate(elapsed: elapsed, lastActive: elapsed - 1, settings: on)
+            if action != .none { actions.append(action) }
+        }
+        XCTAssertEqual(actions, (2...9).map { .longRunning(hours: $0) })
+        // Sound returning withdraws an outstanding reminder, and the stop clock does not carry over.
+        var resumed = StopReminderPolicy()
+        XCTAssertEqual(resumed.evaluate(elapsed: 1200, lastActive: 0, settings: on), .remindQuiet(quiet: 1200))
+        XCTAssertEqual(resumed.evaluate(elapsed: 1300, lastActive: 1290, settings: on), .none)
+        XCTAssertFalse(resumed.reminderOutstanding)
+        // Quiet again later: a fresh reminder, not an immediate stop from the earlier one.
+        XCTAssertEqual(resumed.evaluate(elapsed: 1300 + 20 * 60, lastActive: 1290, settings: on), .remindQuiet(quiet: 1210))
+    }
+
+    func testKeepRecordingSnoozesAndSettingsAreHonoured() {
+        var policy = StopReminderPolicy()
+        let on = StopReminderPolicy.Settings()
+        XCTAssertEqual(policy.evaluate(elapsed: 600, lastActive: 0, settings: on), .remindQuiet(quiet: 600))
+        policy.keepRecording(at: 620)
+        XCTAssertFalse(policy.reminderOutstanding)
+        XCTAssertEqual(policy.evaluate(elapsed: 2000, lastActive: 0, settings: on), .none)
+        XCTAssertEqual(policy.evaluate(elapsed: 2420, lastActive: 0, settings: on), .remindQuiet(quiet: 2420))
+        // Reminders off: nothing, and auto-stop can never fire without a reminder first.
+        var off = StopReminderPolicy()
+        let none = StopReminderPolicy.Settings(remindWhenQuiet: false, autoStopWhenQuiet: true)
+        XCTAssertEqual(off.evaluate(elapsed: 5000, lastActive: 0, settings: none), .none)
+        XCTAssertEqual(off.evaluate(elapsed: 9000, lastActive: 0, settings: none), .none)
+        // Reminders on, auto-stop off: remind, never stop.
+        var remindOnly = StopReminderPolicy()
+        let keepGoing = StopReminderPolicy.Settings(remindWhenQuiet: true, autoStopWhenQuiet: false)
+        XCTAssertEqual(remindOnly.evaluate(elapsed: 700, lastActive: 0, settings: keepGoing), .remindQuiet(quiet: 700))
+        XCTAssertEqual(remindOnly.evaluate(elapsed: 5000, lastActive: 0, settings: keepGoing), .none)
     }
 
     func testRingBoundsAndWraparound() throws {

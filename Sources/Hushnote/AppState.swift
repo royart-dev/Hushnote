@@ -25,6 +25,10 @@ final class AppState {
     var includeMicrophone = true { didSet { UserDefaults.standard.set(includeMicrophone, forKey: "microphone") } }
     var includeAudioInExport = true { didSet { UserDefaults.standard.set(includeAudioInExport, forKey: "includeAudio") } }
     var autoProcess = true { didSet { UserDefaults.standard.set(autoProcess, forKey: "autoProcess") } }
+    var remindWhenQuiet = true { didSet { UserDefaults.standard.set(remindWhenQuiet, forKey: "remindWhenQuiet") } }
+    var autoStopWhenQuiet = true { didSet { UserDefaults.standard.set(autoStopWhenQuiet, forKey: "autoStopWhenQuiet") } }
+    /// Minutes of silence while a "still recording?" reminder is outstanding.
+    private(set) var quietMinutes: Int?
 
     // Status
     var isRecording = false
@@ -50,6 +54,8 @@ final class AppState {
     @ObservationIgnored private var active: Meeting?
     @ObservationIgnored private var healthTimer: Timer?
     @ObservationIgnored private var healthTicks = 0
+    @ObservationIgnored private var reminder = StopReminderPolicy()
+    @ObservationIgnored private let notifier = RecordingNotifier()
     @ObservationIgnored private var worker: Process?
     @ObservationIgnored private var operationTask: Task<Void, Never>?
     @ObservationIgnored private var libraryTask: Task<Void, Never>?
@@ -66,6 +72,10 @@ final class AppState {
         includeMicrophone = defaults.object(forKey: "microphone") as? Bool ?? true
         includeAudioInExport = defaults.object(forKey: "includeAudio") as? Bool ?? true
         autoProcess = defaults.object(forKey: "autoProcess") as? Bool ?? true
+        remindWhenQuiet = defaults.object(forKey: "remindWhenQuiet") as? Bool ?? true
+        autoStopWhenQuiet = defaults.object(forKey: "autoStopWhenQuiet") as? Bool ?? true
+        notifier.onStop = { [weak self] in self?.stopRecording() }
+        notifier.onKeep = { [weak self] in self?.keepRecording() }
         refreshModels()
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
@@ -216,6 +226,8 @@ final class AppState {
             active = meeting; upsert(meeting)
             try writer.writeNow(meeting, to: manifest)
             recordingStartedAt = capture.startedAt
+            reminder = StopReminderPolicy(); quietMinutes = nil
+            if remindWhenQuiet { notifier.prepare() }
             recordingTitle = meeting.title
             isRecording = true
             title = ""
@@ -260,6 +272,7 @@ final class AppState {
     private func checkHealth() {
         guard isRecording else { return }
         if let error = capture?.healthError { stopRecording(warning: error); return }
+        evaluateReminders()
         healthTicks += 1
         guard healthTicks % 15 == 1 else { return }
         if let values = try? locations.root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
@@ -269,15 +282,51 @@ final class AppState {
         }
     }
 
-    func stopRecording(warning: String? = nil, process: Bool = true) {
+    /// Quiet / long-running nudges. Runs every 2 s on numbers already measured while writing audio.
+    private func evaluateReminders() {
+        guard let capture else { return }
+        let settings = StopReminderPolicy.Settings(remindWhenQuiet: remindWhenQuiet, autoStopWhenQuiet: autoStopWhenQuiet)
+        let action = reminder.evaluate(elapsed: capture.elapsedSeconds, lastActive: capture.lastActiveSeconds, settings: settings)
+        let quiet = max(0, capture.elapsedSeconds - capture.lastActiveSeconds)
+        let shown: Int? = reminder.reminderOutstanding ? Int(quiet / 60) : nil
+        if shown != quietMinutes {
+            if shown == nil { notifier.clearQuiet() }
+            quietMinutes = shown; onStatusChange?()
+        }
+        switch action {
+        case .none: break
+        case .remindQuiet(let quiet):
+            notifier.postQuiet(minutes: Int(quiet / 60), stopsInMinutes: autoStopWhenQuiet ? Int(reminder.grace / 60) : nil)
+        case .longRunning(let hours):
+            notifier.postLong(hours: hours)
+        case .autoStop(let quiet, let lastActive):
+            let minutes = Int(quiet / 60)
+            let note = "Stopped automatically after \(minutes) minutes without audio (quiet since \(Meeting.timestamp(lastActive))). The quiet period is included in the saved audio."
+            // Keep the last half minute of silence as a natural tail; the meeting ended at lastActive.
+            stopRecording(note: note, trimTo: lastActive + 30)
+            notifier.postStopped(quietMinutes: minutes)
+        }
+    }
+
+    /// "Keep recording": the user is still here. Stay quiet for a while and never auto-stop this lull.
+    func keepRecording() {
+        guard let capture else { return }
+        reminder.keepRecording(at: capture.elapsedSeconds)
+        quietMinutes = nil; notifier.clearQuiet(); onStatusChange?()
+    }
+
+    func stopRecording(warning: String? = nil, process: Bool = true, note: String? = nil, trimTo: TimeInterval? = nil) {
         guard var meeting = active else { return }
         healthTimer?.invalidate(); healthTimer = nil
+        quietMinutes = nil; notifier.clearQuiet()
         let result = capture?.stop()
         capture = nil; active = nil; isRecording = false; recordingStartedAt = nil; recordingTitle = nil
         meeting.chunks = result?.chunks ?? meeting.chunks
         meeting.warnings += result?.warnings ?? []
         if let warning { meeting.warnings.append(warning); errorMessage = warning }
         meeting.duration = max(Date().timeIntervalSince(meeting.startedAt), meeting.chunks.map { $0.start + $0.duration }.max() ?? 0)
+        if let trimTo { meeting.duration = min(meeting.duration, max(trimTo, 1)) }
+        if let note { meeting.warnings.append(note) }
         meeting.state = warning == nil ? .ready : .interrupted
         do { try writer.writeNow(meeting, to: locations.manifest(meeting.id)) } catch { errorMessage = error.localizedDescription }
         upsert(meeting)

@@ -22,7 +22,7 @@ struct HushnoteMain {
             return
         }
         if args.first == "--audio-check", args.count == 3 {
-            do { try audioCheck(fixture: URL(fileURLWithPath: args[1]), directory: URL(fileURLWithPath: args[2])); print("PASS: real-audio import, chunked PCM conversion, compressed audio export and Markdown export") }
+            do { try audioCheck(fixture: URL(fileURLWithPath: args[1]), directory: URL(fileURLWithPath: args[2])); print("PASS: real-audio import, chunked PCM conversion, compressed audio export, Markdown export and activity metering") }
             catch { print(error.localizedDescription); exit(1) }
             return
         }
@@ -85,6 +85,32 @@ struct HushnoteMain {
         let exported = try FileManager.default.contentsOfDirectory(at: audioRoot, includingPropertiesForKeys: nil)[0].appendingPathComponent("system.m4a")
         let encoded = try AVAudioFile(forReading: exported)
         guard abs(Double(encoded.length)/encoded.processingFormat.sampleRate-originalDuration) < 0.2 else { throw CaptureFailure(message: "Compressed audio duration changed.") }
+
+        // The "recording went quiet" reminder depends on the loudness feed: real speech must register
+        // as activity through the real ring and resampler, and digital silence must not.
+        let rate = original.processingFormat.sampleRate
+        let speechMeter = ActivityMeter(startedAt: 0)
+        let speechSink = try TrackSink(source: "system", sampleRate: rate, offset: 0, directory: directory)
+        speechSink.meter = speechMeter; speechSink.start()
+        original.framePosition = 0
+        while original.framePosition < original.length {
+            try original.read(into: input, frameCount: AVAudioFrameCount(min(2048, original.length-original.framePosition)))
+            hn_ring_push(speechSink.ring, input.audioBufferList, input.frameLength)
+            Thread.sleep(forTimeInterval: Double(input.frameLength) / rate / 8)
+        }
+        _ = speechSink.stop()
+        guard speechMeter.lastActive > 0 else { throw CaptureFailure(message: "Real speech did not register as activity.") }
+        let silentMeter = ActivityMeter(startedAt: 0)
+        let silentSink = try TrackSink(source: "microphone", sampleRate: rate, offset: 0, directory: directory)
+        silentSink.meter = silentMeter; silentSink.start()
+        input.frameLength = 2048
+        memset(input.floatChannelData![0], 0, 2048 * MemoryLayout<Float>.size)
+        for _ in 0..<Int(rate * 5 / 2048) {
+            hn_ring_push(silentSink.ring, input.audioBufferList, input.frameLength)
+            Thread.sleep(forTimeInterval: 2048 / rate / 8)
+        }
+        _ = silentSink.stop()
+        guard silentMeter.lastActive == 0 else { throw CaptureFailure(message: "Silence registered as activity.") }
     }
 }
 
@@ -97,6 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let toggleItem = NSMenuItem(title: "", action: #selector(toggleRecording), keyEquivalent: "r")
     private let importItem = NSMenuItem(title: "Import audio…", action: #selector(importAudio), keyEquivalent: "")
+    private let keepItem = NSMenuItem(title: "Keep recording", action: #selector(keepRecording), keyEquivalent: "")
     private var hotkey: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
     private var wasRecording = false
@@ -125,6 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func showWindow() { NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil) }
     @objc private func toggleRecording() { state.toggleRecording() }
     @objc private func importAudio() { showWindow(); state.importAudio() }
+    @objc private func keepRecording() { state.keepRecording() }
     @objc private func quit() { NSApp.terminate(nil) }
 
     /// A normal Dock app needs an application menu as well as its menu-bar status menu.
@@ -147,15 +175,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self; menu.autoenablesItems = false
         statusLine.isEnabled = false
         toggleItem.keyEquivalentModifierMask = [.command, .option]; toggleItem.target = self
-        importItem.target = self
+        importItem.target = self; keepItem.target = self; keepItem.isHidden = true
         let show = NSMenuItem(title: "Open Hushnote", action: #selector(showWindow), keyEquivalent: ""); show.target = self
         let quit = NSMenuItem(title: "Quit Hushnote", action: #selector(quit), keyEquivalent: "q"); quit.target = self
-        [statusLine, .separator(), toggleItem, show, importItem, .separator(), quit].forEach(menu.addItem)
+        [statusLine, .separator(), keepItem, toggleItem, show, importItem, .separator(), quit].forEach(menu.addItem)
         item.menu = menu
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        if let start = state.recordingStartedAt {
+        keepItem.isHidden = state.quietMinutes == nil
+        if let quiet = state.quietMinutes {
+            statusLine.title = "Still recording? No audio for \(quiet) min"
+        } else if let start = state.recordingStartedAt {
             statusLine.title = "Recording · \(Meeting.timestamp(Date().timeIntervalSince(start)))"
         } else if state.isWorking {
             statusLine.title = state.progress.isEmpty ? "Processing locally…" : state.progress
@@ -170,6 +201,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func statusChanged() {
         item.button?.image = state.isRecording ? StatusIcon.recording : state.isWorking ? StatusIcon.working : StatusIcon.idle
         item.button?.setAccessibilityLabel(state.isRecording ? "Hushnote, recording" : state.isWorking ? "Hushnote, processing" : "Hushnote")
+        // Fallback for when notifications are off: the menu bar says it too.
+        item.button?.imagePosition = state.quietMinutes == nil ? .imageOnly : .imageLeading
+        item.button?.title = state.quietMinutes.map { " Quiet \($0)m" } ?? ""
         item.button?.toolTip = state.isRecording ? "Hushnote is recording — ⌥⌘R to stop" : "Hushnote — ⌥⌘R to record"
         if state.isRecording && !wasRecording {
             window.orderOut(nil)

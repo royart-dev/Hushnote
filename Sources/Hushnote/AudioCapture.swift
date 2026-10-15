@@ -1,5 +1,6 @@
 import Foundation
 import os
+import Accelerate
 import CoreAudio
 import AVFoundation
 import CaptureRing
@@ -36,6 +37,9 @@ final class TrackSink {
     private let failureMessage = OSAllocatedUnfairLock<String?>(initialState: nil)
     private let prefix: String
     var onCheckpoint: ((AudioChunk) -> Void)?
+    /// Optional loudness feed for the "recording went quiet" reminder.
+    var meter: ActivityMeter?
+    private lazy var track = CaptureTrack(rawValue: source)
 
     init(source: String, sampleRate: Double, offset: Double, directory: URL) throws {
         guard let ring = hn_ring_create(UInt32(sampleRate * 4)),
@@ -75,7 +79,15 @@ final class TrackSink {
                     supplied = true; status.pointee = .haveData; return self.input
                 }
                 if let conversionError { throw conversionError }
-                if output.frameLength > 0 { try write(output) }
+                if output.frameLength > 0 {
+                    if let meter, let track, let samples = output.floatChannelData?[0] {
+                        var rms: Float = 0
+                        vDSP_rmsqv(samples, 1, &rms, vDSP_Length(output.frameLength))
+                        meter.observe(track, rms: rms, seconds: Double(output.frameLength) / 16_000,
+                                      at: ProcessInfo.processInfo.systemUptime)
+                    }
+                    try write(output)
+                }
             }
         } catch {
             failure = error
@@ -150,6 +162,10 @@ final class AudioCapture {
     private var recoveryBegan: [CaptureTrack: TimeInterval] = [:]
     var onCheckpoint: ((AudioChunk) -> Void)?
     var microphoneOffset: Double = 0
+    private let activity = ActivityMeter()
+    /// Seconds into the recording, and when sound was last sustained (same clock).
+    var elapsedSeconds: TimeInterval { elapsed }
+    var lastActiveSeconds: TimeInterval { max(0, activity.lastActive - originUptime) }
 
     private lazy var recovery = CaptureRouteRecovery(
         disconnect: { [weak self] track in self?.disconnect(track) },
@@ -167,6 +183,7 @@ final class AudioCapture {
         }
         self.directory = directory
         sessionID = UUID(); startedAt = Date(); originUptime = ProcessInfo.processInfo.systemUptime
+        activity.reset(at: originUptime)
         previousChunks = []; warnings = []; recoveryBegan = [:]
         microphoneStarted = false; microphoneOffset = 0
         recovery.begin(includeMicrophone ? [.system, .microphone] : [.system])
@@ -226,7 +243,7 @@ final class AudioCapture {
         }
         let sink = try TrackSink(source: "system", sampleRate: format.mSampleRate,
                                  offset: offset(for: .system), directory: directory)
-        sink.onCheckpoint = onCheckpoint; system = sink
+        sink.onCheckpoint = onCheckpoint; sink.meter = activity; system = sink
         let aggregateDescription: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Hushnote capture",
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
@@ -282,7 +299,7 @@ final class AudioCapture {
         let start = offset(for: .microphone)
         let sink = try TrackSink(source: "microphone", sampleRate: format.sampleRate,
                                  offset: start, directory: directory)
-        sink.onCheckpoint = onCheckpoint; mic = sink; self.engine = engine
+        sink.onCheckpoint = onCheckpoint; sink.meter = activity; mic = sink; self.engine = engine
         let generation = UUID(); microphoneGeneration = generation
         let sampleRate = format.sampleRate, channels = format.channelCount
         let ring = sink.ring

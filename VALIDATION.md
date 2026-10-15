@@ -79,6 +79,12 @@ The packaged speech worker also processed the public 21.44-second fixture offlin
 
 Live Bluetooth/USB/internal-device handoffs still need an end-to-end hardware trial. A physical device handoff can briefly withhold samples; the implementation preserves that elapsed gap instead of claiming it can recover audio macOS did not deliver. This update does not claim sample-perfect gapless hardware switching.
 
+### Forgotten-recording reminder
+
+Quiet is inferred from loudness (RMS of the 16 kHz audio, threshold about -44 dBFS, one reading per 250 ms drain), with 1 s of sustained sound required and a 2 s gap rule, so chimes and key clicks do not count. The policy is a pure state machine with core checks for: no reminder before 10 quiet minutes, one reminder (not repeated), withdrawal when sound resumes, auto-stop 20 minutes after an unanswered reminder (30 minutes after the meeting ended), no automatic stop across 9 hours of continuous audio (hourly nudges only), snooze on "Keep recording", and both settings. `--audio-check` also feeds the real speech fixture and 5 s of digital silence through the real sink: speech registers, silence does not. Metering added 0.08 s of user CPU across an 11 s run.
+
+Not yet verified: the notification banner and its buttons, and the first-use permission prompt, which need a live session in the installed app. Thresholds (10 / 20 / 30 minutes, -44 dBFS) are reasoned defaults, not tuned on real meetings; a room with constant loud background noise would never read as quiet and would only receive the hourly nudge.
+
 ## Still requires a consented live test
 
 No macOS microphone/system-audio permissions were accepted by the agent, and no private meeting was recorded. Start a short test recording in Hushnote, respond to the macOS prompts, play meeting audio, speak briefly, stop and review both tracks. This is needed to verify the actual tap, simultaneous microphone capture, current output device, routing, and permission behavior on this Mac.
