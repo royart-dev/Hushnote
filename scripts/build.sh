@@ -21,6 +21,19 @@ for bundle in "$bin"/*.bundle; do
     ln -s "../Resources/$(basename "$bundle")" "$app/Contents/Helpers/$(basename "$bundle")"
   fi
 done
+# SwiftPM embeds the absolute build directory as a fallback path for resource bundles. The packaged app
+# finds its bundles next to the worker, so overwrite that prefix with an inert string of the same length.
+# This keeps the builder's user name and folders out of anything that gets distributed.
+python3 - "$PWD" "$app/Contents/Helpers/HushnoteWorker" "$app/Contents/MacOS/Hushnote" <<'PY'
+import sys
+root, *files = sys.argv[1:]
+needle = root.encode()
+filler = (b"/nonexistent" + b"/" * len(needle))[:len(needle)]
+for path in files:
+    data = open(path, "rb").read()
+    if needle in data:
+        open(path, "wb").write(data.replace(needle, filler))
+PY
 if [ -d .cache/llama ]; then
   mkdir -p "$app/Contents/Helpers/llama"
   runtime=.cache/llama/llama-b11429
@@ -28,6 +41,12 @@ if [ -d .cache/llama ]; then
   cp "$runtime/llama-completion" "$app/Contents/Helpers/llama/"
   cp -R "$runtime"/libggml*.dylib "$runtime"/libllama.0*.dylib "$runtime"/libllama-common*.dylib "$runtime/libllama-completion-impl.dylib" "$app/Contents/Helpers/llama/"
 fi
+for private in "$PWD" "$HOME"; do
+  if grep -rqaF -- "$private" "$app"; then
+    echo "error: $private is still embedded in the bundle; refusing to package it." >&2
+    exit 1
+  fi
+done
 find "$app/Contents" -type f \( -name '*.dylib' -o -name 'llama-completion' -o -name 'llama-cli' -o -name 'HushnoteWorker' \) -exec codesign --force --sign - '{}' \;
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
