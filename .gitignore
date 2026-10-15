@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+dist/
+.cache/
+.models/
+# Local-only research about third-party software on the development machine.
+research/
+scripts/research-summary.mjs
+.DS_Store
