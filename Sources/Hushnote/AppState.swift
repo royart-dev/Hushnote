@@ -240,7 +240,8 @@ final class AppState {
         writer.write(meeting, to: locations.manifest(meeting.id)) { error in
             Task { @MainActor [weak self] in
                 guard self?.active?.id == recordingID else { return }
-                self?.stopRecording(warning: error.localizedDescription)
+                // Storage is failing: processing would write more to the same place.
+                self?.stopRecording(warning: error.localizedDescription, process: false)
             }
         }
     }
@@ -263,7 +264,8 @@ final class AppState {
         guard healthTicks % 15 == 1 else { return }
         if let values = try? locations.root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
            let free = values.volumeAvailableCapacityForImportantUsage, free < 256_000_000 {
-            stopRecording(warning: "Recording stopped because less than 256 MB of storage remains.")
+            // Models and transcripts need disk too; leave processing until space is freed.
+            stopRecording(warning: "Recording stopped because less than 256 MB of storage remains. Free some space, then choose Process.", process: false)
         }
     }
 
