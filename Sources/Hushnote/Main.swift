@@ -9,6 +9,13 @@ import CaptureRing
 struct HushnoteMain {
     @MainActor static func main() async {
         let args = Array(CommandLine.arguments.dropFirst())
+        if args.first == "--route-check", args.count == 2 {
+            do {
+                try await RouteCheck.run(in: URL(fileURLWithPath: args[1]))
+                print("PASS: independent device handoffs, 48/44.1/16 kHz format changes, bounded capture checkpoints, reconnect retry, timeline and AAC/Markdown export")
+            } catch { print(error.localizedDescription); exit(1) }
+            return
+        }
         if args.first == "--install-summary", args.count == 2 {
             do { try await SummaryRunner.install(in: URL(fileURLWithPath: args[1])); print("Summary model installed and SHA-256 verified.") }
             catch { print(error.localizedDescription); exit(1) }

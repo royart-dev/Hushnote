@@ -135,40 +135,82 @@ final class AudioCapture {
     private var system: TrackSink?
     private var mic: TrackSink?
     private var engine: AVAudioEngine?
-    private var routeListener: AudioObjectPropertyListenerBlock?
+    private var deviceListeners: [(AudioObjectPropertySelector, AudioObjectPropertyListenerBlock)] = []
+    private var tapFormatListener: AudioObjectPropertyListenerBlock?
     private var engineObserver: NSObjectProtocol?
+    private var systemGeneration: UUID?
+    private var microphoneGeneration: UUID?
     private var directory: URL?
+    private var sessionID: UUID?
+    private var originUptime: TimeInterval = 0
+    private var microphoneStarted = false
     private(set) var startedAt = Date()
     private var previousChunks: [AudioChunk] = []
     private var warnings: [String] = []
+    private var recoveryBegan: [CaptureTrack: TimeInterval] = [:]
     var onCheckpoint: ((AudioChunk) -> Void)?
-    var onFailure: ((String) -> Void)?
     var microphoneOffset: Double = 0
+
+    private lazy var recovery = CaptureRouteRecovery(
+        disconnect: { [weak self] track in self?.disconnect(track) },
+        reconnect: { [weak self] track in
+            guard let self, self.directory != nil else { throw CancellationError() }
+            try self.reconnect(track)
+        })
+
+    private var elapsed: TimeInterval { max(0, ProcessInfo.processInfo.systemUptime - originUptime) }
 
     func start(directory: URL, includeMicrophone: Bool) async throws {
         if includeMicrophone {
             let allowed = await AVCaptureDevice.requestAccess(for: .audio)
             guard allowed else { throw CaptureFailure(message: "Microphone permission was declined. Enable it in System Settings or turn off Include my microphone.") }
         }
-        self.directory = directory; startedAt = Date()
+        self.directory = directory
+        sessionID = UUID(); startedAt = Date(); originUptime = ProcessInfo.processInfo.systemUptime
+        previousChunks = []; warnings = []; recoveryBegan = [:]
+        microphoneStarted = false; microphoneOffset = 0
+        recovery.begin(includeMicrophone ? [.system, .microphone] : [.system])
         do {
+            try monitorDevices(includeMicrophone: includeMicrophone)
             try startSystem()
-            if includeMicrophone { try startMicrophone() }
-            var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-                                                      mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-            let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-                Task { @MainActor in self?.restartSystemForRouteChange() }
+            if includeMicrophone {
+                // During a Bluetooth handoff the default input may briefly be unavailable.
+                // Keep system audio running and retry the microphone instead of ending the meeting.
+                do { try startMicrophone() }
+                catch { recovery.changed(.microphone) }
             }
-            routeListener = listener
-            try checkAudio(AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, listener), "Monitoring audio device changes")
         } catch {
             _ = stop()
             throw error
         }
     }
 
+    private func monitorDevices(includeMicrophone: Bool) throws {
+        guard let expected = sessionID else { return }
+        var selectors = [kAudioHardwarePropertyDefaultOutputDevice]
+        if includeMicrophone { selectors.append(kAudioHardwarePropertyDefaultInputDevice) }
+        for selector in selectors {
+            var address = AudioObjectPropertyAddress(mSelector: selector,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            let track: CaptureTrack = selector == kAudioHardwarePropertyDefaultOutputDevice ? .system : .microphone
+            let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                Task { @MainActor in
+                    guard let self, self.sessionID == expected else { return }
+                    self.recovery.changed(track)
+                }
+            }
+            try checkAudio(AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, listener), "Monitoring audio device changes")
+            deviceListeners.append((selector, listener))
+        }
+    }
+
+    private func offset(for track: CaptureTrack) -> TimeInterval {
+        CaptureTimeline.nextOffset(elapsed: elapsed, chunks: previousChunks, source: track.rawValue)
+    }
+
     private func startSystem() throws {
-        guard let directory else { return }
+        guard let directory, let expected = sessionID else { return }
+        let generation = UUID(); systemGeneration = generation
         let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
         description.name = "Hushnote meeting audio"; description.isPrivate = true
         description.muteBehavior = .unmuted
@@ -176,15 +218,14 @@ final class AudioCapture {
         var format = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         var address = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyFormat,
-                                                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         try checkAudio(AudioObjectGetPropertyData(tap, &address, 0, nil, &size, &format), "Reading the audio format")
         guard format.mFormatID == kAudioFormatLinearPCM, format.mBitsPerChannel == 32,
-              format.mFormatFlags & kAudioFormatFlagIsFloat != 0 else {
+              format.mSampleRate > 0, format.mFormatFlags & kAudioFormatFlagIsFloat != 0 else {
             throw CaptureFailure(message: "This output device does not expose Float32 audio.")
         }
-        if previousChunks.isEmpty && system == nil { startedAt = Date() }
         let sink = try TrackSink(source: "system", sampleRate: format.mSampleRate,
-                                 offset: Date().timeIntervalSince(startedAt), directory: directory)
+                                 offset: offset(for: .system), directory: directory)
         sink.onCheckpoint = onCheckpoint; system = sink
         let aggregateDescription: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Hushnote capture",
@@ -203,31 +244,74 @@ final class AudioCapture {
         }, "Starting the audio callback")
         sink.start()
         try checkAudio(AudioDeviceStart(aggregate, ioProc), "Starting system audio capture")
+
+        // The same default device can change format without changing its identity.
+        let expectedTap = tap
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor in
+                guard let self, self.sessionID == expected, self.systemGeneration == generation,
+                      self.tap == expectedTap else { return }
+                var current = AudioStreamBasicDescription()
+                var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+                var address = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyFormat,
+                    mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+                if AudioObjectGetPropertyData(expectedTap, &address, 0, nil, &size, &current) == noErr,
+                   current.mSampleRate == format.mSampleRate, current.mChannelsPerFrame == format.mChannelsPerFrame,
+                   current.mFormatFlags == format.mFormatFlags, current.mBitsPerChannel == format.mBitsPerChannel { return }
+                self.recovery.changed(.system)
+            }
+        }
+        try checkAudio(AudioObjectAddPropertyListenerBlock(tap, &address, .main, listener), "Monitoring the system audio format")
+        tapFormatListener = listener
     }
 
     private func startMicrophone() throws {
-        guard let directory else { return }
+        guard let directory, let expected = sessionID else { return }
+        var device: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        try checkAudio(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device), "Reading the microphone")
+        guard device != kAudioObjectUnknown else { throw CaptureFailure(message: "The microphone is reconnecting.") }
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0, format.commonFormat == .pcmFormatFloat32 else {
             throw CaptureFailure(message: "No usable microphone is connected.")
         }
-        microphoneOffset = Date().timeIntervalSince(startedAt)
+        let start = offset(for: .microphone)
         let sink = try TrackSink(source: "microphone", sampleRate: format.sampleRate,
-                                 offset: microphoneOffset, directory: directory)
+                                 offset: start, directory: directory)
         sink.onCheckpoint = onCheckpoint; mic = sink; self.engine = engine
+        let generation = UUID(); microphoneGeneration = generation
+        let sampleRate = format.sampleRate, channels = format.channelCount
         let ring = sink.ring
         input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
             hn_ring_push(ring, buffer.audioBufferList, buffer.frameLength)
         }
-        sink.start(); try engine.start()
-        engineObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.onFailure?("The microphone configuration changed. Saved audio is safe; select your device and start a new recording.") }
+        engineObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
+            // Apple's notification can arrive on an engine queue. Never tear down there:
+            // hop to the main actor and reject callbacks from an already replaced engine.
+            Task { @MainActor in
+                guard let self, self.sessionID == expected, self.microphoneGeneration == generation,
+                      let engine = self.engine else { return }
+                let current = engine.inputNode.outputFormat(forBus: 0)
+                if engine.isRunning, current.sampleRate == sampleRate, current.channelCount == channels { return }
+                self.recovery.changed(.microphone)
+            }
         }
+        sink.start(); try engine.start()
+        if !microphoneStarted { microphoneOffset = start; microphoneStarted = true }
     }
 
     private func stopSystem() {
+        systemGeneration = nil
+        if let tapFormatListener, tap != 0 {
+            var address = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyFormat,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            AudioObjectRemovePropertyListenerBlock(tap, &address, .main, tapFormatListener)
+        }
+        tapFormatListener = nil
         if aggregate != 0, let ioProc {
             AudioDeviceStop(aggregate, ioProc); AudioDeviceDestroyIOProcID(aggregate, ioProc)
         }
@@ -240,27 +324,53 @@ final class AudioCapture {
         system = nil
     }
 
-    private func restartSystemForRouteChange() {
-        guard directory != nil else { return }
-        stopSystem()
-        warnings.append("Audio output changed at \(Meeting.timestamp(Date().timeIntervalSince(startedAt))); capture was reconnected. A short gap may occur.")
-        do { try startSystem() }
-        catch { onFailure?(error.localizedDescription) }
+    private func stopMicrophone() {
+        microphoneGeneration = nil
+        if let engineObserver { NotificationCenter.default.removeObserver(engineObserver) }
+        engineObserver = nil
+        engine?.stop()
+        engine?.inputNode.removeTap(onBus: 0)
+        engine = nil
+        if let mic {
+            let result = mic.stop(); previousChunks += result.chunks; warnings += result.warnings
+        }
+        mic = nil
+    }
+
+    private func disconnect(_ track: CaptureTrack) {
+        if recoveryBegan[track] == nil { recoveryBegan[track] = elapsed }
+        switch track {
+        case .system: stopSystem()
+        case .microphone: stopMicrophone()
+        }
+    }
+
+    private func reconnect(_ track: CaptureTrack) throws {
+        switch track {
+        case .system: try startSystem()
+        case .microphone: try startMicrophone()
+        }
+        if let began = recoveryBegan.removeValue(forKey: track), elapsed - began > 3 {
+            // Honest post-meeting diagnostics for a prolonged hardware outage, never a popup.
+            warnings.append("\(track.rawValue.capitalized) audio was unavailable at \(Meeting.timestamp(began)) for \(Meeting.timestamp(elapsed - began)) during a device handoff; capture resumed automatically.")
+        }
     }
 
     func stop() -> (chunks: [AudioChunk], warnings: [String]) {
-        if let routeListener {
-            var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-                                                    mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, routeListener)
+        // Invalidate callbacks and retries BEFORE stopping graphs; they cannot resurrect capture.
+        sessionID = nil
+        recovery.stop()
+        for (selector, listener) in deviceListeners {
+            var address = AudioObjectPropertyAddress(mSelector: selector,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, listener)
         }
-        routeListener = nil
-        if let engineObserver { NotificationCenter.default.removeObserver(engineObserver) }
-        engineObserver = nil
-        engine?.inputNode.removeTap(onBus: 0); engine?.stop(); engine = nil
-        stopSystem()
-        if let mic { let result = mic.stop(); previousChunks += result.chunks; warnings += result.warnings }
-        mic = nil; directory = nil
+        deviceListeners = []
+        stopMicrophone(); stopSystem()
+        for (track, began) in recoveryBegan where elapsed - began > 3 {
+            warnings.append("\(track.rawValue.capitalized) audio was unavailable from \(Meeting.timestamp(began)) until recording stopped; saved audio from the other track is preserved.")
+        }
+        recoveryBegan = [:]; directory = nil
         return (previousChunks.sorted { $0.start < $1.start }, warnings)
     }
     var healthError: String? { system?.healthError ?? mic?.healthError }

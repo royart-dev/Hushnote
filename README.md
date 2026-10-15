@@ -34,7 +34,7 @@ Google Drive works through **Google Drive for desktop**. Paste a folder link for
 - Parakeet TDT v2 English, via FluidAudio/Core ML and CPU + Apple Neural Engine. This is a different Parakeet variant from Handy's Unified model. ASR concurrency is one.
 - Optional Qwen 2.5 1.5B Q4_K_M summaries run via bundled llama.cpp on the GPU (Metal), falling back to four CPU threads if the GPU run fails. Metal keeps the weights file-backed instead of repacking them into ~1.1 GB of anonymous memory. Context is capped at 4096 tokens; long transcripts are summarized in ~9 KB sections and combined.
 - Without the summary model, notes explicitly contain selected transcript excerpts rather than pretending to be a generative summary.
-- Completed transcription checkpoints persist atomically. Interrupted sessions can be resumed. Output-route changes reconnect system capture; microphone reconfiguration or sleep safely ends the session and records a warning.
+- Completed transcription checkpoints persist atomically. Interrupted sessions can be resumed. Output and input device switches quietly reconnect only the affected capture track, without ending the recording or showing a popup. Repeated Bluetooth/USB format-change events are coalesced and temporarily unavailable devices are retried with capped backoff. The other track keeps running. Hardware handoff gaps remain on the original timeline; extended outages are recorded as post-meeting diagnostics. Sleep still ends the recording safely. Non-device capture failures still auto-process saved audio when automatic processing is enabled.
 - Export uses streaming conversion and never loads a whole meeting into an audio array. Existing exported notes are preserved with a new filename.
 
 Actual memory measurements and validation results are recorded in `VALIDATION.md`. Targets are not guarantees. Very long transcripts and Core ML compilation still require additional memory.
@@ -65,6 +65,7 @@ For a real audio integration check without recording anything:
 
 ```sh
 dist/Hushnote.app/Contents/MacOS/Hushnote --audio-check /absolute/path/to/short-audio.wav /absolute/path/to/check-output
+dist/Hushnote.app/Contents/MacOS/Hushnote --route-check /absolute/path/to/handoff-check-output
 ```
 
 The worker also exposes `prepare <model-root>`, `fixture <audio-under-35s> <output-directory>`, `diarize <session.json> <model-root>`, `transcribe <session.json> <model-root>` and `inspect <session.json>`. `prepare` downloads models; `diarize`/`transcribe` load only local files and fail locally if missing. Checks use a native executable because this Mac has command-line tools without XCTest.

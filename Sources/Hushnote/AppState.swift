@@ -208,8 +208,8 @@ final class AppState {
             try writer.writeNow(meeting, to: manifest)
             active = meeting; upsert(meeting); route = .capture
             let capture = AudioCapture(); self.capture = capture
-            capture.onCheckpoint = { [weak self] chunk in Task { @MainActor in self?.checkpoint(chunk) } }
-            capture.onFailure = { [weak self] message in self?.stopRecording(warning: message, process: false) }
+            let recordingID = meeting.id
+            capture.onCheckpoint = { [weak self] chunk in Task { @MainActor in self?.checkpoint(chunk, recordingID: recordingID) } }
             try await capture.start(directory: directory, includeMicrophone: includeMicrophone)
             meeting.startedAt = capture.startedAt
             meeting.microphoneOffset = capture.microphoneOffset
@@ -231,13 +231,17 @@ final class AppState {
         }
     }
 
-    private func checkpoint(_ chunk: AudioChunk) {
-        guard var meeting = active, !meeting.chunks.contains(where: { $0.file == chunk.file }) else { return }
+    private func checkpoint(_ chunk: AudioChunk, recordingID: UUID) {
+        guard var meeting = active, meeting.id == recordingID,
+              !meeting.chunks.contains(where: { $0.file == chunk.file }) else { return }
         meeting.chunks.append(chunk)
         active = meeting
         if current?.id == meeting.id { current = meeting }
         writer.write(meeting, to: locations.manifest(meeting.id)) { error in
-            Task { @MainActor [weak self] in self?.stopRecording(warning: error.localizedDescription, process: false) }
+            Task { @MainActor [weak self] in
+                guard self?.active?.id == recordingID else { return }
+                self?.stopRecording(warning: error.localizedDescription)
+            }
         }
     }
 
@@ -254,12 +258,12 @@ final class AppState {
 
     private func checkHealth() {
         guard isRecording else { return }
-        if let error = capture?.healthError { stopRecording(warning: error, process: false); return }
+        if let error = capture?.healthError { stopRecording(warning: error); return }
         healthTicks += 1
         guard healthTicks % 15 == 1 else { return }
         if let values = try? locations.root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
            let free = values.volumeAvailableCapacityForImportantUsage, free < 256_000_000 {
-            stopRecording(warning: "Recording stopped because less than 256 MB of storage remains.", process: false)
+            stopRecording(warning: "Recording stopped because less than 256 MB of storage remains.")
         }
     }
 
@@ -277,7 +281,10 @@ final class AppState {
         upsert(meeting)
         route = .meeting(meeting.id)
         onStatusChange?()
-        if process && autoProcess && hasSpeechModels && !meeting.chunks.isEmpty { processMeeting(meeting.id) }
+        if CaptureProcessing.shouldStart(requested: process, automatic: autoProcess,
+                                         modelsAvailable: hasSpeechModels, chunkCount: meeting.chunks.count) {
+            processMeeting(meeting.id)
+        }
     }
 
     // MARK: Destination

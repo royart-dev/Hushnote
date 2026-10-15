@@ -16,7 +16,7 @@ private func XCTUnwrap<T>(_ value: T?) throws -> T {
 
 @main
 final class CoreTests {
-    static func main() throws {
+    @MainActor static func main() async throws {
         let checks = CoreTests()
         try checks.testSessionRoundTripAndEscapedMarkdown()
         try checks.testAudioPathCannotEscapeSession()
@@ -25,7 +25,11 @@ final class CoreTests {
         checks.testNoteOutlineAcceptsLooseModelMarkdown()
         try checks.testManifestReadsWaitForQueuedWrites()
         try checks.testRingBoundsAndWraparound()
-        print("PASS: session persistence, header-only listing, Markdown/YAML escaping, path containment, speaker overlap, transcript excerpts, note outline, read-after-queued-write, bounded ring and wraparound")
+        try await checks.testRouteRecoveryCoalescesAndLeavesOtherTrackRunning()
+        try await checks.testRouteRecoveryRetriesUnavailableDevices()
+        try await checks.testRouteRecoveryCannotRestartAfterStop()
+        checks.testReconnectTimelineAndInterruptionProcessing()
+        print("PASS: session persistence, header-only listing, Markdown/YAML escaping, path containment, speaker overlap, transcript excerpts, note outline, read-after-queued-write, bounded ring, route-switch coalescing, independent tracks, reconnect retries, stop cancellation, timeline continuity and interruption processing")
     }
     func testSessionRoundTripAndEscapedMarkdown() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -95,6 +99,92 @@ final class CoreTests {
         }
         XCTAssertEqual(try writer.read(url).summary, "Edit 25")
         XCTAssertEqual(try writer.serially { try MeetingFiles.read(url) }.summary, "Edit 25")
+    }
+
+    @MainActor
+    private func waitUntil(_ condition: () -> Bool) async throws {
+        for _ in 0..<200 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(condition())
+    }
+
+    @MainActor
+    func testRouteRecoveryCoalescesAndLeavesOtherTrackRunning() async throws {
+        var running: Set<CaptureTrack> = [.system, .microphone]
+        var closed: [CaptureTrack] = [], opened: [CaptureTrack] = []
+        let recovery = CaptureRouteRecovery(settleDelay: .milliseconds(5), disconnect: {
+            closed.append($0); running.remove($0)
+        }, reconnect: { opened.append($0); running.insert($0) })
+        recovery.begin([.system, .microphone])
+        for _ in 0..<200 { recovery.changed(.microphone) }
+        XCTAssertEqual(closed, [.microphone])
+        XCTAssertEqual(running, [.system])
+        try await waitUntil { recovery.pending.isEmpty }
+        XCTAssertEqual(opened, [.microphone])
+        XCTAssertEqual(running, [.system, .microphone])
+        recovery.begin([.system])
+        recovery.changed(.microphone)
+        XCTAssertTrue(recovery.pending.isEmpty) // Don't enable a microphone the user turned off.
+        recovery.stop()
+    }
+
+    @MainActor
+    func testRouteRecoveryRetriesUnavailableDevices() async throws {
+        var attempts: [CaptureTrack: Int] = [:]
+        var closed: [CaptureTrack: Int] = [:]
+        let recovery = CaptureRouteRecovery(settleDelay: .milliseconds(2), retryDelays: [.milliseconds(3), .milliseconds(5)],
+            disconnect: { closed[$0, default: 0] += 1 }, reconnect: { track in
+                attempts[track, default: 0] += 1
+                if track == .microphone && attempts[track]! < 3 { throw CocoaError(.fileReadUnknown) }
+            })
+        recovery.begin([.system, .microphone])
+        for _ in 0..<100 { recovery.changed(.system); recovery.changed(.microphone) }
+        try await waitUntil { recovery.pending.isEmpty }
+        XCTAssertEqual(attempts[.system], 1)
+        XCTAssertEqual(attempts[.microphone], 3)
+        XCTAssertEqual(closed[.system], 1)
+        XCTAssertEqual(closed[.microphone], 3) // Partial allocations cleaned up after each failed attempt.
+        recovery.stop()
+    }
+
+    @MainActor
+    func testRouteRecoveryCannotRestartAfterStop() async throws {
+        var attempts = 0
+        var unavailable = true
+        let recovery = CaptureRouteRecovery(settleDelay: .milliseconds(2), retryDelays: [.milliseconds(5)],
+            disconnect: { _ in }, reconnect: { _ in
+                attempts += 1
+                if unavailable { throw CocoaError(.fileReadUnknown) }
+            })
+        recovery.begin([.system]); recovery.changed(.system)
+        try await waitUntil { attempts > 0 }
+        recovery.stop()
+        let atStop = attempts
+        recovery.changed(.system)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(attempts, atStop)
+        XCTAssertTrue(recovery.pending.isEmpty)
+        // A queued retry from the old recording must not open a graph in a new recording.
+        unavailable = false
+        recovery.begin([.microphone]); recovery.changed(.microphone)
+        try await waitUntil { recovery.pending.isEmpty }
+        XCTAssertEqual(attempts, atStop + 1)
+        recovery.stop()
+    }
+
+    func testReconnectTimelineAndInterruptionProcessing() {
+        let chunks = [AudioChunk(file: "system-0.caf", source: "system", start: 0.1, duration: 0.4),
+                      AudioChunk(file: "mic-0.caf", source: "microphone", start: 0.2, duration: 20)]
+        XCTAssertEqual(CaptureTimeline.nextOffset(elapsed: 0.3, chunks: chunks, source: "system"), 0.5)
+        XCTAssertEqual(CaptureTimeline.nextOffset(elapsed: 2.5, chunks: chunks, source: "system"), 2.5)
+        XCTAssertEqual(CaptureTimeline.nextOffset(elapsed: 0.1, chunks: [], source: "system"), 0.1)
+        XCTAssertTrue(CaptureProcessing.shouldStart(requested: true, automatic: true, modelsAvailable: true, chunkCount: 238))
+        XCTAssertFalse(CaptureProcessing.shouldStart(requested: false, automatic: true, modelsAvailable: true, chunkCount: 238))
+        XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: false, modelsAvailable: true, chunkCount: 238))
+        XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: true, modelsAvailable: false, chunkCount: 238))
+        XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: true, modelsAvailable: true, chunkCount: 0))
     }
 
     func testRingBoundsAndWraparound() throws {
