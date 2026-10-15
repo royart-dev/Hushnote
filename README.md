@@ -1,4 +1,10 @@
-# Hushnote
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="design/Hushnote_Logo.svg">
+    <img src="design/Hushnote_Logo_Ink.svg" alt="Hushnote logo" width="112">
+  </picture>
+  <h1>Hushnote</h1>
+</div>
 
 A native Apple Silicon Mac meeting recorder. Capture system audio and an optional microphone, process speech locally, review speaker-labelled transcripts, and save one Markdown note directly to a chosen folder. No meeting attendee, login, video frames, or cloud inference.
 
@@ -68,7 +74,10 @@ The worker also exposes `prepare <model-root>`, `fixture <audio-under-35s> <outp
 ```sh
 swift scripts/make-icon.swift            # Resources/AppIcon.icns, 16–1024 px on the macOS 824/1024 icon grid
 python3 scripts/make-logo-geometry.py    # Sources/Hushnote/LogoGeometry.swift
+swift scripts/make-social-preview.swift  # design/social-preview.png (1280 x 640)
 ```
+
+`Hushnote_Logo_Ink.svg` is the logo with the H in the dark ink colour, used on light backgrounds such as this README in light mode. `social-preview.png` is the share image for the repository; GitHub only accepts it through Settings → Social preview.
 
 The app draws the logo as native vector geometry. In the sidebar the H follows the theme's ink colour (cream in dark mode, as in the artwork) and the pill stays vermilion. The menu-bar icon uses the same mark with the pill knocked out when idle, filled while processing, and red while recording. The theme's ink, cream and signal colours are the artwork's exact `#1C1B18`, `#F5EFE5` and `#F74D21`.
 
