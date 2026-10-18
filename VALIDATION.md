@@ -85,6 +85,17 @@ Quiet is inferred from loudness (RMS of the 16 kHz audio, threshold about -44 dB
 
 Not yet verified: the notification banner and its buttons, and the first-use permission prompt, which need a live session in the installed app. Thresholds (10 / 20 / 30 minutes, -44 dBFS) are reasoned defaults, not tuned on real meetings; a room with constant loud background noise would never read as quiet and would only receive the hourly nudge.
 
+### Choosable summary engines
+
+Core checks cover the privacy rules (loopback-only counts as local, including rejecting `127.0.0.1.example.com`, which an early version wrongly accepted), per-engine consent, settings that survive missing, unknown and future fields, and the response formats of OpenAI Responses, OpenAI-compatible chat completions and the Anthropic Messages API, including refusals, truncation and error bodies.
+
+With the packaged app and `--summary-check`:
+- **Model file:** the bundled Qwen file chosen as a custom model, prompted through its own chat template (`-cnv -st --jinja`): 2.2 s, correct dates and decisions. It attributed one action item to the wrong person, a small-model limitation.
+- **ChatGPT:** one live summary through the user's ChatGPT plan via Codex 0.160.1: 9.6 s, accurate, timestamped.
+- **OpenAI, Anthropic and an OpenAI-compatible server:** tested against a local stand-in server that recorded each request. Paths, auth headers, `anthropic-version`, the server-side fallback header and `fallbacks: "default"`, `max_tokens`, `store: false`, and the system and source prompts were all as intended. A rejected key returned "Anthropic rejected the API key." No real OpenAI or Anthropic API call was made (no keys were used).
+
+Settings were reviewed as renders in light and dark. Not yet verified live: the in-app **Continue with ChatGPT** browser sign-in (this Mac was already signed in), Keychain prompts after an update, and real Ollama or LM Studio servers (neither is installed here).
+
 ## Still requires a consented live test
 
 No macOS microphone/system-audio permissions were accepted by the agent, and no private meeting was recorded. Start a short test recording in Hushnote, respond to the macOS prompts, play meeting audio, speak briefly, stop and review both tracks. This is needed to verify the actual tap, simultaneous microphone capture, current output device, routing, and permission behavior on this Mac.

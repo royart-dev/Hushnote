@@ -24,6 +24,8 @@ final class CoreTests {
         checks.testHighlightsAreSourceExcerpts()
         checks.testNoteOutlineAcceptsLooseModelMarkdown()
         checks.testActivityMeterIgnoresChimesAndCountsSpeech()
+        try checks.testSummaryEnginePrivacyAndSettings()
+        try checks.testSummaryResponsesParse()
         checks.testQuietRecordingIsRemindedThenStopped()
         checks.testLiveAudioIsNeverStoppedAutomatically()
         checks.testKeepRecordingSnoozesAndSettingsAreHonoured()
@@ -33,7 +35,7 @@ final class CoreTests {
         try await checks.testRouteRecoveryRetriesUnavailableDevices()
         try await checks.testRouteRecoveryCannotRestartAfterStop()
         checks.testReconnectTimelineAndInterruptionProcessing()
-        print("PASS: session persistence, header-only listing, Markdown/YAML escaping, path containment, speaker overlap, transcript excerpts, note outline, read-after-queued-write, bounded ring, route-switch coalescing, independent tracks, reconnect retries, activity meter, quiet reminders, stop cancellation, timeline continuity and interruption processing")
+        print("PASS: session persistence, header-only listing, Markdown/YAML escaping, path containment, speaker overlap, transcript excerpts, note outline, summary engines, read-after-queued-write, bounded ring, route-switch coalescing, independent tracks, reconnect retries, activity meter, quiet reminders, stop cancellation, timeline continuity and interruption processing")
     }
     func testSessionRoundTripAndEscapedMarkdown() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -189,6 +191,51 @@ final class CoreTests {
         XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: false, modelsAvailable: true, chunkCount: 238))
         XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: true, modelsAvailable: false, chunkCount: 238))
         XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: true, modelsAvailable: true, chunkCount: 0))
+    }
+
+    func testSummaryEnginePrivacyAndSettings() throws {
+        var settings = SummarySettings()
+        XCTAssertFalse(settings.sendsOffDevice(.bundled))
+        XCTAssertFalse(settings.sendsOffDevice(.localModel))
+        XCTAssertFalse(settings.sendsOffDevice(.localServer))      // default Ollama address
+        XCTAssertTrue(settings.sendsOffDevice(.chatGPT))
+        XCTAssertTrue(settings.sendsOffDevice(.anthropic))
+        settings.serverURL = "http://192.168.1.20:11434/v1"
+        XCTAssertTrue(settings.sendsOffDevice(.localServer))       // another machine is not "this Mac"
+        settings.serverURL = "http://localhost:1234/v1"
+        XCTAssertFalse(settings.sendsOffDevice(.localServer))
+        XCTAssertFalse(SummarySettings.isLoopback("http://127.0.0.1.example.com/v1"))
+        XCTAssertFalse(SummarySettings.isLoopback("http://127.0.0.300:80"))
+        XCTAssertTrue(SummarySettings.isLoopback("http://127.0.0.1:1234/v1"))
+        XCTAssertTrue(SummarySettings.isLoopback("http://[::1]:11434/v1"))
+        settings.engine = .chatGPT
+        XCTAssertTrue(settings.needsConsent)
+        settings.consented = [.chatGPT]
+        XCTAssertFalse(settings.needsConsent)
+        // Saved settings survive app versions that add or drop fields and engines.
+        let restored = try JSONDecoder().decode(SummarySettings.self, from: JSONEncoder().encode(settings))
+        XCTAssertEqual(restored, settings)
+        let older = try JSONDecoder().decode(SummarySettings.self, from: Data(#"{"engine":"anthropic","futureField":1,"consented":["anthropic","someday"]}"#.utf8))
+        XCTAssertEqual(older.engine, .anthropic)
+        XCTAssertEqual(older.consented, [.anthropic])
+        XCTAssertEqual(older.anthropicModel, "claude-opus-5-5")
+        let unknown = try JSONDecoder().decode(SummarySettings.self, from: Data(#"{"engine":"gemini"}"#.utf8))
+        XCTAssertEqual(unknown.engine, .bundled)
+        XCTAssertEqual(SummaryPrompt.clean("```markdown\n## Summary\nShip it.\n``` [end of text]"), "## Summary\nShip it.")
+    }
+
+    func testSummaryResponsesParse() throws {
+        let data = { (json: String) in Data(json.utf8) }
+        XCTAssertEqual(try SummaryResponse.openAIResponses(data(###"{"status":"completed","output":[{"type":"reasoning"},{"type":"message","content":[{"type":"output_text","text":"## Summary"},{"type":"output_text","text":"\nShip it."}]}]}"###)), "## Summary\nShip it.")
+        XCTAssertThrowsError(try SummaryResponse.openAIResponses(data(###"{"output":[{"type":"message","content":[{"type":"refusal","refusal":"No."}]}]}"###)))
+        let partial = try SummaryResponse.openAIResponses(data(###"{"status":"incomplete","output":[{"type":"message","content":[{"type":"output_text","text":"Partial"}]}]}"###))
+        XCTAssertTrue(partial.hasSuffix("cut short.)_"))
+        XCTAssertEqual(try SummaryResponse.chatCompletions(data(###"{"choices":[{"message":{"role":"assistant","content":"Notes"},"finish_reason":"stop"}]}"###)), "Notes")
+        XCTAssertEqual(try SummaryResponse.anthropicMessages(data(###"{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":""},{"type":"text","text":"## Decisions"}]}"###)), "## Decisions")
+        XCTAssertThrowsError(try SummaryResponse.anthropicMessages(data(###"{"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber"},"content":[]}"###)))
+        XCTAssertThrowsError(try SummaryResponse.chatCompletions(data("not json")))
+        XCTAssertEqual(SummaryResponse.errorMessage(data(###"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"###)), "invalid x-api-key")
+        XCTAssertEqual(SummaryResponse.modelIDs(data(###"{"data":[{"id":"b"},{"id":"a"}]}"###)), ["a", "b"])
     }
 
     func testActivityMeterIgnoresChimesAndCountsSpeech() {

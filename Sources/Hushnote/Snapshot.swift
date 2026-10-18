@@ -36,6 +36,11 @@ enum Snapshot {
         Scene(name: "4-processing") { s in s.route = .meeting(fixtures[2].id); s.previewWorking(fixtures[2].id, "Transcribing · 4 of 9", 3.0 / 9) },
         Scene(name: "5-recording-dark", appearance: .darkAqua) { s in s.previewRecording(Date().addingTimeInterval(-1_394), title: "Weekly design sync") },
         Scene(name: "6-settings") { $0.route = .settings },
+        Scene(name: "10-summaries-chatgpt", size: CGSize(width: 1120, height: 1700)) { s in s.route = .settings; s.summarySettings.engine = .chatGPT; s.chatGPTSignIn = .signedOut },
+        Scene(name: "11-summaries-anthropic-dark", size: CGSize(width: 1120, height: 1700), appearance: .darkAqua) { s in
+            s.route = .settings; s.summarySettings.engine = .anthropic; s.summarySettings.consented = [.anthropic]; s.savedKeys = [.anthropic]
+            s.engineTest = EngineTestResult(engine: .anthropic, ok: true, text: "Worked in 4 s. ## Summary The beta ships on 3 November; billing waits until January.")
+        },
         Scene(name: "7-interrupted") { $0.route = .meeting(fixtures[3].id) },
     ]
 

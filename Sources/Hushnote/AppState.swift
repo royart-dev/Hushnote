@@ -45,6 +45,15 @@ final class AppState {
     var lastExport: URL?
     private(set) var hasSpeechModels = false
     private(set) var hasSummaryModel = false
+    // Summary engine. API keys are in the Keychain; only "a key is saved" flags live in preferences.
+    var summarySettings = SummarySettings() { didSet { saveSummarySettings() } }
+    var savedKeys: Set<SummaryEngine> = []
+    var chatGPTSignIn: Codex.SignIn?
+    var chatGPTSigningIn = false
+    var chatGPTSignInURL: URL?
+    var engineModels: [SummaryEngine: [String]] = [:]
+    var engineTest: EngineTestResult?
+    var engineTesting = false
     private(set) var storageBytes: Int64?
 
     let locations = AppLocations()
@@ -77,6 +86,7 @@ final class AppState {
         notifier.onStop = { [weak self] in self?.stopRecording() }
         notifier.onKeep = { [weak self] in self?.keepRecording() }
         refreshModels()
+        loadSummarySettings()
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.isRecording else { return }
@@ -102,6 +112,8 @@ final class AppState {
     #endif
 
     // MARK: Library
+
+    var isPreview: Bool { previewStore != nil }
 
     func isLocked(_ id: UUID) -> Bool { (isWorking && busyID == id) || active?.id == id }
 
@@ -421,16 +433,18 @@ final class AppState {
             try await runWorker(["transcribe", manifest, models]) { [weak self] done, total in self?.stage("Transcribing", done, total) }
             guard var meeting = loadMeeting(id) else { throw CaptureFailure(message: "The processed meeting could not be read.") }
             upsert(meeting)
-            if hasSummaryModel {
+            // The bundled model is optional; every other engine is an explicit choice, so failures are reported.
+            if summarySettings.engine != .bundled || hasSummaryModel {
                 stage("Writing summary")
                 do {
-                    meeting.summary = try await SummaryRunner.make(meeting, models: locations.models, session: locations.directory(id)) { [weak self] done, total in
+                    let provider = try await makeSummaryProvider(directory: locations.directory(id))
+                    meeting.summary = try await SummaryRunner.make(meeting, provider: provider) { [weak self] done, total in
                         self?.stage("Writing summary", done, total)
                     }
-                    meeting.summaryMethod = "Local Qwen 2.5 1.5B · AI-generated, check against the transcript"
+                    meeting.summaryMethod = "\(provider.method) · AI-generated, check against the transcript"
                 } catch {
                     if Task.isCancelled { throw CancellationError() }
-                    meeting.warnings.append("Generative summary failed; transcript excerpts were saved instead. \(error.localizedDescription)")
+                    meeting.warnings.append("The summary wasn't written (\(summarySettings.engine.title)): \(error.localizedDescription) Transcript excerpts were kept instead.")
                 }
             }
             if meeting.summary.isEmpty {

@@ -26,12 +26,31 @@ struct HushnoteMain {
             catch { print(error.localizedDescription); exit(1) }
             return
         }
-        if args.first == "--summary-check", args.count == 3 {
-            let url = URL(fileURLWithPath: args[1])
+        // Developer check: --summary-check <session.json> <models-dir> [engine] [path=… url=… model=… base=… key=…]
+        // Engines: bundled (default), localModel, localServer, chatGPT, openAI, anthropic. Never reads saved keys.
+        if args.first == "--summary-check", args.count >= 3 {
+            let url = URL(fileURLWithPath: args[1]), folder = url.deletingLastPathComponent()
+            let options = Dictionary(args.dropFirst(4).compactMap { arg -> (String, String)? in
+                guard let eq = arg.firstIndex(of: "=") else { return nil }
+                return (String(arg[..<eq]), String(arg[arg.index(after: eq)...]))
+            }, uniquingKeysWith: { $1 })
             do {
+                let engine = args.count > 3 ? SummaryEngine(rawValue: args[3]) : .bundled
+                let provider: SummaryProvider
+                switch engine {
+                case .bundled: provider = LlamaProvider(model: URL(fileURLWithPath: args[2]).appendingPathComponent(SummaryRunner.modelName), directory: folder, useModelTemplate: false, method: "Local Qwen 2.5 1.5B")
+                case .localModel: provider = LlamaProvider(model: URL(fileURLWithPath: options["path"] ?? ""), directory: folder, useModelTemplate: true, method: "Local model")
+                case .localServer: provider = HTTPSummaryProvider(kind: .localServer, base: URL(string: options["url"] ?? "http://127.0.0.1:11434/v1")!, model: options["model"] ?? "", key: nil, method: "Model server")
+                case .openAI: provider = HTTPSummaryProvider(kind: .openAI, base: URL(string: options["base"] ?? "https://api.openai.com/v1")!, model: options["model"] ?? "", key: options["key"], method: "OpenAI (API)")
+                case .anthropic: provider = HTTPSummaryProvider(kind: .anthropic, base: URL(string: options["base"] ?? "https://api.anthropic.com")!, model: options["model"] ?? "claude-opus-5-5", key: options["key"], method: "Claude (API)")
+                case .chatGPT:
+                    guard let codex = Codex.find(), await Codex.status(codex) == .chatGPT else { throw SummaryFailure("Codex is not signed in with ChatGPT.") }
+                    provider = CodexProvider(executable: codex)
+                case nil: throw SummaryFailure("Unknown engine \(args[3]).")
+                }
                 var meeting = try MeetingFiles.read(url)
-                meeting.summary = try await SummaryRunner.make(meeting, models: URL(fileURLWithPath: args[2]), session: url.deletingLastPathComponent())
-                meeting.summaryMethod = "Local Qwen 2.5 1.5B"
+                meeting.summary = try await SummaryRunner.make(meeting, provider: provider)
+                meeting.summaryMethod = provider.method
                 try MeetingFiles.save(meeting, to: url); print(meeting.summary)
             } catch { print(error.localizedDescription); exit(1) }
             return

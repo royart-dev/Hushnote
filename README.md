@@ -6,7 +6,7 @@
   <h1>Hushnote</h1>
 </div>
 
-A native Apple Silicon Mac meeting recorder. Capture system audio and an optional microphone, process speech locally, review speaker-labelled transcripts, and save one Markdown note directly to a chosen folder. No meeting attendee, login, video frames, or cloud inference.
+A native Apple Silicon Mac meeting recorder. Capture system audio and an optional microphone, process speech locally, review speaker-labelled transcripts, and save one Markdown note directly to a chosen folder. No meeting attendee, login or video frames. Everything runs on your Mac unless you choose an online summary engine.
 
 ## Run
 
@@ -70,6 +70,25 @@ dist/Hushnote.app/Contents/MacOS/Hushnote --route-check /absolute/path/to/handof
 ```
 
 The worker also exposes `prepare <model-root>`, `fixture <audio-under-35s> <output-directory>`, `diarize <session.json> <model-root>`, `transcribe <session.json> <model-root>` and `inspect <session.json>`. `prepare` downloads models; `diarize`/`transcribe` load only local files and fail locally if missing. Checks use a native executable because this Mac has command-line tools without XCTest.
+
+## Summary engines
+
+Settings → Summaries chooses what writes the notes. Recording and transcription always stay on this Mac; only the summary step changes.
+
+| Engine | Where it runs | What it needs |
+| --- | --- | --- |
+| Qwen 2.5 1.5B (default) | This Mac, Metal | The 1.12 GB bundled model download |
+| A model file you choose | This Mac, bundled llama.cpp, using the model's own chat template | Any `.gguf` file |
+| Ollama or LM Studio | A model server on this Mac (OpenAI-compatible) | The server running and a model name; **Load list** fills it in |
+| Your ChatGPT subscription | OpenAI | The ChatGPT app or Codex CLI. **Continue with ChatGPT** opens OpenAI's own sign-in page; no token passes through Hushnote |
+| OpenAI API key | OpenAI, billed per use | A key, stored in the macOS Keychain |
+| Anthropic API key | Anthropic (Claude), billed per use | A key, stored in the macOS Keychain |
+
+Engines that send the transcript off the Mac are labelled **Sends transcript** and need an explicit **Privacy** switch per engine. A model server on another computer counts as sending. **Test engine** summarises a short made-up exchange so you can check a setup before a real meeting. If an engine fails, the meeting keeps transcript excerpts and records why.
+
+ChatGPT runs through OpenAI's Codex CLI with shell, tools, plugins, browser and web search switched off, and API-key variables removed, so it can only answer and never falls back to paid API use. Claude Pro and Max subscriptions can't be used by other apps under Anthropic's terms, so Claude is offered through an API key; current Claude models get Anthropic's server-side fallback if a request is declined. Ad-hoc signed builds may ask once for Keychain access after an update.
+
+Developer check, without saved settings or keys: `dist/Hushnote.app/Contents/MacOS/Hushnote --summary-check <session.json> <models-dir> [bundled|localModel|localServer|chatGPT|openAI|anthropic] [path=… url=… model=… base=… key=…]`.
 
 ## Design assets
 

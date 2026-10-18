@@ -657,11 +657,16 @@ struct SettingsView: View {
                     ModelRow(name: "Summary", detail: "Qwen 2.5 1.5B · 4-bit · Metal", size: "1.12 GB", installed: state.hasSummaryModel) {
                         if !state.hasSummaryModel { Button("Download") { state.installSummaryModel() } }
                     }
-                    note("Models load in a separate process after you stop recording and unload when it exits. Without the summary model, notes contain selected transcript excerpts. Downloads fetch model files only; recording, transcription and summaries never touch the network.")
+                    note("Models load in a separate process after you stop recording and unload when it exits. Without a summary engine, notes contain selected transcript excerpts. Downloads fetch model files only; recording and transcription never touch the network.")
                 }
                 .disabled(state.isWorking)
 
-                section("03", "Recording") {
+                section("03", "Summaries") {
+                    SummarySettingsView(state: state)
+                }
+                .disabled(state.isWorking)
+
+                section("04", "Recording") {
                     SettingRow("After stop") {
                         Text("Process automatically").font(.hnBody)
                         Spacer()
