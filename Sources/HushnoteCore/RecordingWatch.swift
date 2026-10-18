@@ -108,3 +108,12 @@ public struct StopReminderPolicy: Sendable {
         snoozedUntil = elapsed + snooze
     }
 }
+
+/// A notification action only applies to the recording that posted it. A button left in Notification
+/// Center from an earlier recording (or an earlier launch) must never stop a newer one.
+public enum NotificationRouting {
+    public static func shouldAct(notificationRecording: String?, activeRecording: UUID?) -> Bool {
+        guard let notificationRecording, let activeRecording else { return false }
+        return notificationRecording.caseInsensitiveCompare(activeRecording.uuidString) == .orderedSame
+    }
+}

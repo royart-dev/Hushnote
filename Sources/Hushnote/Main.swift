@@ -26,6 +26,38 @@ struct HushnoteMain {
             catch { print(error.localizedDescription); exit(1) }
             return
         }
+        // Developer check: two model runs at once (an engine test beside processing). Cancelling one task
+        // must stop exactly its own process, and cancelling the other must leave nothing running.
+        if args.first == "--cancel-check", args.count == 2 {
+            do {
+                let model = URL(fileURLWithPath: args[1]).appendingPathComponent(SummaryRunner.modelName)
+                let make = { () throws -> LlamaProvider in
+                    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("hushnote-cancel-\(UUID().uuidString)")
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    return LlamaProvider(model: model, directory: folder, useModelTemplate: false, method: "check")
+                }
+                let source = (0..<60).map { "[00:\(String(format: "%02d", $0)):00] Speaker 1: We should review the plan, the budget, the schedule and the open risks again." }.joined(separator: "\n")
+                let running = {
+                    let pgrep = Process(); pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+                    pgrep.arguments = ["-P", String(getpid()), "-f", "llama-completion"]
+                    let pipe = Pipe(); pgrep.standardOutput = pipe
+                    try? pgrep.run(); pgrep.waitUntilExit()
+                    return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n").count
+                }
+                let first = try make(), second = try make()
+                let a = Task { try await first.generate(source, combine: false) }
+                let b = Task { try await second.generate(source, combine: false) }
+                try await Task.sleep(for: .seconds(2))
+                guard running() == 2 else { throw CaptureFailure(message: "Expected two model processes, found \(running()).") }
+                a.cancel(); try await Task.sleep(for: .seconds(1))
+                guard running() == 1 else { throw CaptureFailure(message: "Cancelling one run left \(running()) processes (expected exactly the other).") }
+                b.cancel(); try await Task.sleep(for: .seconds(1))
+                guard running() == 0 else { throw CaptureFailure(message: "A model process was left running after cancellation.") }
+                _ = try? await a.value; _ = try? await b.value
+                print("PASS: cancelling a summary run stops exactly its own model process; none is left running")
+            } catch { print(error.localizedDescription); exit(1) }
+            return
+        }
         // Developer check: --summary-check <session.json> <models-dir> [engine] [path=… url=… model=… base=… key=…]
         // Engines: bundled (default), localModel, localServer, chatGPT, openAI, anthropic. Never reads saved keys.
         if args.first == "--summary-check", args.count >= 3 {

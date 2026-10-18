@@ -24,7 +24,7 @@ struct SummarySettingsView: View {
                 }
             }
             SettingRow("Check") {
-                Button(state.engineTesting ? "Testing…" : "Test engine") { state.testSummaryEngine() }.disabled(state.engineTesting)
+                Button(state.engineTesting ? "Testing…" : "Test engine") { state.testSummaryEngine() }.disabled(!state.canTestEngine)
                 if let result = state.engineTest, result.engine == engine {
                     Lamp(color: result.ok ? HN.cool : HN.signal, filled: result.ok)
                     Text(result.text).font(.system(size: 12)).foregroundStyle(result.ok ? HN.ink2 : HN.signal)

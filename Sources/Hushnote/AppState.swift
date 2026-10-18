@@ -67,6 +67,8 @@ final class AppState {
     @ObservationIgnored private let notifier = RecordingNotifier()
     @ObservationIgnored private var worker: Process?
     @ObservationIgnored private var operationTask: Task<Void, Never>?
+    @ObservationIgnored var engineTestTask: Task<Void, Never>?
+    @ObservationIgnored var signInTask: Task<Void, Never>?
     @ObservationIgnored private var libraryTask: Task<Void, Never>?
     @ObservationIgnored private var pendingSave: Task<Void, Never>?
     @ObservationIgnored private var dirty = false
@@ -83,8 +85,15 @@ final class AppState {
         autoProcess = defaults.object(forKey: "autoProcess") as? Bool ?? true
         remindWhenQuiet = defaults.object(forKey: "remindWhenQuiet") as? Bool ?? true
         autoStopWhenQuiet = defaults.object(forKey: "autoStopWhenQuiet") as? Bool ?? true
-        notifier.onStop = { [weak self] in self?.stopRecording() }
-        notifier.onKeep = { [weak self] in self?.keepRecording() }
+        // Notification buttons only act on the recording that posted them.
+        notifier.onStop = { [weak self] id in
+            guard let self, NotificationRouting.shouldAct(notificationRecording: id, activeRecording: self.active?.id) else { return }
+            self.stopRecording()
+        }
+        notifier.onKeep = { [weak self] id in
+            guard let self, NotificationRouting.shouldAct(notificationRecording: id, activeRecording: self.active?.id) else { return }
+            self.keepRecording()
+        }
         refreshModels()
         loadSummarySettings()
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -220,6 +229,7 @@ final class AppState {
     private func startRecording() async {
         defer { isStarting = false; onStatusChange?() }
         guard !isWorking, !isRecording else { return }
+        engineTestTask?.cancel()   // A recording takes priority over an engine check.
         flushSave()
         let name = title.trimmingCharacters(in: .whitespaces)
         var meeting = Meeting(title: name.isEmpty ? "Untitled meeting" : name, project: project.trimmingCharacters(in: .whitespaces))
@@ -296,27 +306,27 @@ final class AppState {
 
     /// Quiet / long-running nudges. Runs every 2 s on numbers already measured while writing audio.
     private func evaluateReminders() {
-        guard let capture else { return }
+        guard let capture, let recording = active?.id else { return }
         let settings = StopReminderPolicy.Settings(remindWhenQuiet: remindWhenQuiet, autoStopWhenQuiet: autoStopWhenQuiet)
         let action = reminder.evaluate(elapsed: capture.elapsedSeconds, lastActive: capture.lastActiveSeconds, settings: settings)
         let quiet = max(0, capture.elapsedSeconds - capture.lastActiveSeconds)
         let shown: Int? = reminder.reminderOutstanding ? Int(quiet / 60) : nil
         if shown != quietMinutes {
-            if shown == nil { notifier.clearQuiet() }
+            if shown == nil { notifier.clearQuiet(recording: recording) }
             quietMinutes = shown; onStatusChange?()
         }
         switch action {
         case .none: break
         case .remindQuiet(let quiet):
-            notifier.postQuiet(minutes: Int(quiet / 60), stopsInMinutes: autoStopWhenQuiet ? Int(reminder.grace / 60) : nil)
+            notifier.postQuiet(recording: recording, minutes: Int(quiet / 60), stopsInMinutes: autoStopWhenQuiet ? Int(reminder.grace / 60) : nil)
         case .longRunning(let hours):
-            notifier.postLong(hours: hours)
+            notifier.postLong(recording: recording, hours: hours)
         case .autoStop(let quiet, let lastActive):
             let minutes = Int(quiet / 60)
             let note = "Stopped automatically after \(minutes) minutes without audio (quiet since \(Meeting.timestamp(lastActive))). The quiet period is included in the saved audio."
             // Keep the last half minute of silence as a natural tail; the meeting ended at lastActive.
             stopRecording(note: note, trimTo: lastActive + 30)
-            notifier.postStopped(quietMinutes: minutes)
+            notifier.postStopped(recording: recording, quietMinutes: minutes)
         }
     }
 
@@ -324,13 +334,16 @@ final class AppState {
     func keepRecording() {
         guard let capture else { return }
         reminder.keepRecording(at: capture.elapsedSeconds)
-        quietMinutes = nil; notifier.clearQuiet(); onStatusChange?()
+        quietMinutes = nil; notifier.clearQuiet(recording: active?.id); onStatusChange?()
     }
 
-    func stopRecording(warning: String? = nil, process: Bool = true, note: String? = nil, trimTo: TimeInterval? = nil) {
+    /// `process` defaults to "only when nothing went wrong": a stop that carries a warning (storage, sleep,
+    /// write failure) never starts models writing to the same disk unless a caller explicitly asks.
+    func stopRecording(warning: String? = nil, process: Bool? = nil, note: String? = nil, trimTo: TimeInterval? = nil) {
         guard var meeting = active else { return }
         healthTimer?.invalidate(); healthTimer = nil
-        quietMinutes = nil; notifier.clearQuiet()
+        // Every reminder with buttons goes, including the long-recording one, so none can outlive this recording.
+        quietMinutes = nil; notifier.clearActionNotices()
         let result = capture?.stop()
         capture = nil; active = nil; isRecording = false; recordingStartedAt = nil; recordingTitle = nil
         meeting.chunks = result?.chunks ?? meeting.chunks
@@ -344,7 +357,7 @@ final class AppState {
         upsert(meeting)
         route = .meeting(meeting.id)
         onStatusChange?()
-        if CaptureProcessing.shouldStart(requested: process, automatic: autoProcess,
+        if CaptureProcessing.shouldStart(requested: process ?? (warning == nil), automatic: autoProcess,
                                          modelsAvailable: hasSpeechModels, chunkCount: meeting.chunks.count) {
             processMeeting(meeting.id)
         }
@@ -489,7 +502,7 @@ final class AppState {
         upsert(meeting)
     }
 
-    func cancelWork() { operationTask?.cancel(); worker?.terminate(); SummaryRunner.cancel() }
+    func cancelWork() { operationTask?.cancel(); engineTestTask?.cancel(); worker?.terminate() }
 
     func importAudio() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.audio]; panel.prompt = "Import audio"

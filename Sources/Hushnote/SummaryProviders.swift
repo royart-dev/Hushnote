@@ -20,7 +20,6 @@ final class LlamaProvider: SummaryProvider {
     // ~3.9 bytes per token on timestamped transcripts, so 9 KB is ~2.4k tokens: with the prompt and
     // 650 generated tokens it stays inside the 4096 context.
     let partLimit = 9_000
-    static var active: Process?
 
     init(model: URL, directory: URL, useModelTemplate: Bool, method: String) {
         self.model = model; self.directory = directory; self.useModelTemplate = useModelTemplate; self.method = method
@@ -75,14 +74,20 @@ final class LlamaProvider: SummaryProvider {
         return output
     }
 
+    /// Runs a process to completion. Cancelling the calling task terminates this process and only this
+    /// one, so a second run (an engine test beside processing, a sign-in) is never mistaken for it and
+    /// no model is left running in the background.
     static func wait(for process: Process, timeout: Double) async throws -> Int32 {
-        active = process
         let timer = Task { try? await Task.sleep(for: .seconds(timeout)); if !Task.isCancelled && process.isRunning { process.terminate() } }
-        defer { timer.cancel(); if active === process { active = nil } }
-        let status: Int32 = try await withCheckedThrowingContinuation { continuation in
-            process.terminationHandler = { p in continuation.resume(returning: p.terminationStatus) }
-            do { try process.run() } catch { process.terminationHandler = nil; continuation.resume(throwing: error) }
-        }
+        defer { timer.cancel() }
+        let status: Int32 = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                process.terminationHandler = { p in continuation.resume(returning: p.terminationStatus) }
+                do { try process.run() } catch { process.terminationHandler = nil; continuation.resume(throwing: error); return }
+                // Cancelled before it launched: the handler below had nothing to stop yet.
+                if Task.isCancelled, process.isRunning { process.terminate() }
+            }
+        } onCancel: { if process.isRunning { process.terminate() } }
         try Task.checkCancellation()
         return status
     }
@@ -100,10 +105,16 @@ final class HTTPSummaryProvider: SummaryProvider {
         self.kind = kind; self.base = base; self.model = model; self.key = key; self.method = method
     }
 
+    /// Redirects are never followed. A server on this Mac could otherwise answer with a redirect and have
+    /// the transcript (and an API key header) re-sent to a host the user never approved.
+    final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+    }
     static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 240; config.timeoutIntervalForResource = 300
-        return URLSession(configuration: config)
+        return URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
     }()
 
     func generate(_ source: String, combine: Bool) async throws -> String {
@@ -160,6 +171,7 @@ final class HTTPSummaryProvider: SummaryProvider {
         let detail = SummaryResponse.errorMessage(data).map { " \($0)" } ?? ""
         let who = kind == .anthropic ? "Anthropic" : kind == .openAI ? "OpenAI" : "The model server"
         switch status {
+        case 300..<400: return "\(who) tried to send Hushnote to another address. Hushnote doesn't follow redirects, because that could send your transcript somewhere you didn't approve."
         case 401, 403: return "\(who) rejected the API key.\(detail)"
         case 404: return "\(who) doesn't know that model.\(detail)"
         case 429: return "\(who) rate limit or quota reached.\(detail)"

@@ -96,6 +96,15 @@ With the packaged app and `--summary-check`:
 
 Settings were reviewed as renders in light and dark. Not yet verified live: the in-app **Continue with ChatGPT** browser sign-in (this Mac was already signed in), Keychain prompts after an update, and real Ollama or LM Studio servers (neither is installed here).
 
+### Review fixes after 0.1.4
+
+1. **Redirects could bypass summary consent.** The HTTP session followed redirects, so a server on this Mac could have answered with a redirect and had the transcript (and any key header) re-sent to a host the user never approved. Reproduced on the released 0.1.4 with two local stand-in servers: the redirect target received the full request (899 bytes, transcript included). Redirects are no longer followed for any HTTP engine; the same test now returns an explanatory error and the target sees nothing.
+2. **Engine tests and cancellation shared one global process slot.** Cancelling stopped the newer process and left the older one running untracked, so a model could stay in memory. Cancellation is now tied to each run's own task and terminates exactly that process; the global slot is gone. Engine tests refuse to start while recording, starting or processing, and a recording cancels a test in progress. The sign-in cancels only its own process. `--cancel-check` runs two model processes at once and checks that cancelling one leaves exactly the other, and cancelling it leaves none (passes; I did not run it against the old code).
+3. **Audio-write failures still triggered processing.** The health-error stop used the default. Stops that carry a warning now never process unless a caller explicitly asks, so a future call site can't miss it.
+4. **Old notification buttons could stop a newer recording.** Notifications now carry the recording they belong to; an action for any other recording, or none, is ignored (core check). Quiet and long-recording reminders are withdrawn for every recording when one ends, and leftovers from an earlier launch are cleared at start.
+
+Not verified live: notification behaviour in the installed app (banner, buttons, withdrawal), which needs a real recording.
+
 ## Still requires a consented live test
 
 No macOS microphone/system-audio permissions were accepted by the agent, and no private meeting was recorded. Start a short test recording in Hushnote, respond to the macOS prompts, play meeting audio, speak briefly, stop and review both tracks. This is needed to verify the actual tap, simultaneous microphone capture, current output device, routing, and permission behavior on this Mac.

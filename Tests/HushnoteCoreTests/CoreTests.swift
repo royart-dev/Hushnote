@@ -29,13 +29,14 @@ final class CoreTests {
         checks.testQuietRecordingIsRemindedThenStopped()
         checks.testLiveAudioIsNeverStoppedAutomatically()
         checks.testKeepRecordingSnoozesAndSettingsAreHonoured()
+        checks.testNotificationActionsOnlyApplyToTheirRecording()
         try checks.testManifestReadsWaitForQueuedWrites()
         try checks.testRingBoundsAndWraparound()
         try await checks.testRouteRecoveryCoalescesAndLeavesOtherTrackRunning()
         try await checks.testRouteRecoveryRetriesUnavailableDevices()
         try await checks.testRouteRecoveryCannotRestartAfterStop()
         checks.testReconnectTimelineAndInterruptionProcessing()
-        print("PASS: session persistence, header-only listing, Markdown/YAML escaping, path containment, speaker overlap, transcript excerpts, note outline, summary engines, read-after-queued-write, bounded ring, route-switch coalescing, independent tracks, reconnect retries, activity meter, quiet reminders, stop cancellation, timeline continuity and interruption processing")
+        print("PASS: session persistence, header-only listing, Markdown/YAML escaping, path containment, speaker overlap, transcript excerpts, note outline, summary engines, read-after-queued-write, bounded ring, route-switch coalescing, independent tracks, reconnect retries, activity meter, quiet reminders, notification routing, stop cancellation, timeline continuity and interruption processing")
     }
     func testSessionRoundTripAndEscapedMarkdown() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -286,6 +287,17 @@ final class CoreTests {
         XCTAssertFalse(resumed.reminderOutstanding)
         // Quiet again later: a fresh reminder, not an immediate stop from the earlier one.
         XCTAssertEqual(resumed.evaluate(elapsed: 1300 + 20 * 60, lastActive: 1290, settings: on), .remindQuiet(quiet: 1210))
+    }
+
+    func testNotificationActionsOnlyApplyToTheirRecording() {
+        let current = UUID(), earlier = UUID()
+        XCTAssertTrue(NotificationRouting.shouldAct(notificationRecording: current.uuidString, activeRecording: current))
+        XCTAssertTrue(NotificationRouting.shouldAct(notificationRecording: current.uuidString.lowercased(), activeRecording: current))
+        // A button from an earlier recording, one with no recording, or a tap with nothing recording: ignored.
+        XCTAssertFalse(NotificationRouting.shouldAct(notificationRecording: earlier.uuidString, activeRecording: current))
+        XCTAssertFalse(NotificationRouting.shouldAct(notificationRecording: nil, activeRecording: current))
+        XCTAssertFalse(NotificationRouting.shouldAct(notificationRecording: current.uuidString, activeRecording: nil))
+        XCTAssertFalse(NotificationRouting.shouldAct(notificationRecording: "not-a-uuid", activeRecording: current))
     }
 
     func testKeepRecordingSnoozesAndSettingsAreHonoured() {

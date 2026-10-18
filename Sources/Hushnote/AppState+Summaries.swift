@@ -121,7 +121,7 @@ extension AppState {
     /// Runs OpenAI's own sign-in: Codex opens the ChatGPT authorization page in the browser and waits
     /// for it to finish. If the page doesn't open, its link is offered in Settings.
     func signInWithChatGPT() {
-        guard !chatGPTSigningIn else { return }
+        guard !chatGPTSigningIn, !isRecording else { return }
         guard let codex = Codex.find() else { chatGPTSignIn = .notInstalled; return }
         chatGPTSigningIn = true; chatGPTSignInURL = nil
         let process = Process(); process.executableURL = codex; process.arguments = ["login"]
@@ -136,15 +136,19 @@ extension AppState {
             let data = handle.availableData
             if data.isEmpty { handle.readabilityHandler = nil } else { lines.consume(data) }
         }
-        Task {
+        signInTask = Task {
             _ = try? await LlamaProvider.wait(for: process, timeout: 600)
             pipe.fileHandleForReading.readabilityHandler = nil
-            chatGPTSigningIn = false; chatGPTSignInURL = nil
+            chatGPTSigningIn = false; chatGPTSignInURL = nil; signInTask = nil
             await refreshChatGPT()
         }
     }
 
-    func cancelChatGPTSignIn() { if chatGPTSigningIn { LlamaProvider.active?.terminate() } }
+    /// Cancelling the task ends only the sign-in process; nothing else is touched.
+    func cancelChatGPTSignIn() { signInTask?.cancel() }
+
+    /// Engine checks wait for a quiet moment: not while recording, processing, or already testing.
+    var canTestEngine: Bool { !engineTesting && !isRecording && !isStarting && !isWorking }
 
     func loadEngineModels() {
         let s = summarySettings
@@ -167,7 +171,7 @@ extension AppState {
 
     /// Summarises a short, made-up exchange so the engine can be checked before a real meeting.
     func testSummaryEngine() {
-        guard !engineTesting else { return }
+        guard canTestEngine else { return }
         let engine = summarySettings.engine
         engineTesting = true; engineTest = nil
         var sample = Meeting(title: "Engine check")
@@ -176,8 +180,8 @@ extension AppState {
             TranscriptSegment(start: 21, end: 30, speaker: "Speaker 2", text: "Agreed. Billing waits until January, and I'll send the vendor quote by Friday."),
         ]
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("hushnote-engine-check-\(UUID().uuidString)")
-        Task {
-            defer { engineTesting = false; try? FileManager.default.removeItem(at: folder) }
+        engineTestTask = Task {
+            defer { engineTesting = false; engineTestTask = nil; try? FileManager.default.removeItem(at: folder) }
             do {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 let provider = try await makeSummaryProvider(directory: folder)

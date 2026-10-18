@@ -5,8 +5,6 @@ import HushnoteCore
 @MainActor
 enum SummaryRunner {
     static let modelName = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
-    /// Stops a running local model or Codex process; HTTP requests stop with their task's cancellation.
-    static func cancel() { LlamaProvider.active?.terminate() }
 
     static func install(in directory: URL) async throws {
         let url = URL(string: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/\(modelName)")!
