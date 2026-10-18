@@ -192,6 +192,8 @@ final class CoreTests {
         XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: false, modelsAvailable: true, chunkCount: 238))
         XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: true, modelsAvailable: false, chunkCount: 238))
         XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: true, modelsAvailable: true, chunkCount: 0))
+        // Processing reads the saved manifest, so a failed final save must not start it.
+        XCTAssertFalse(CaptureProcessing.shouldStart(requested: true, automatic: true, modelsAvailable: true, chunkCount: 238, saved: false))
     }
 
     func testSummaryEnginePrivacyAndSettings() throws {

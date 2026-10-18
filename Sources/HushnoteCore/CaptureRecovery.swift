@@ -86,8 +86,8 @@ public enum CaptureTimeline {
 
 /// Capture failures still leave useful audio to transcribe. Quit/sleep can explicitly defer it.
 public enum CaptureProcessing {
-    public static func shouldStart(requested: Bool, automatic: Bool, modelsAvailable: Bool, chunkCount: Int) -> Bool {
-        requested && automatic && modelsAvailable && chunkCount > 0
+    public static func shouldStart(requested: Bool, automatic: Bool, modelsAvailable: Bool, chunkCount: Int, saved: Bool = true) -> Bool {
+        requested && automatic && modelsAvailable && chunkCount > 0 && saved
     }
 }
 

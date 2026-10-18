@@ -109,6 +109,13 @@ final class AppState {
         }
     }
 
+    /// For developer checks: no library scan, and no preferences or manifests are written.
+    init(forChecks: Void) {
+        previewStore = [:]
+        hasSpeechModels = true
+        refreshModels()
+    }
+
     #if DEBUG
     init(preview meetings: [Meeting]) {
         previewStore = Dictionary(uniqueKeysWithValues: meetings.map { ($0.id, $0) })
@@ -229,7 +236,7 @@ final class AppState {
     private func startRecording() async {
         defer { isStarting = false; onStatusChange?() }
         guard !isWorking, !isRecording else { return }
-        engineTestTask?.cancel()   // A recording takes priority over an engine check.
+        await finishEngineTest()   // A recording takes priority over an engine check, and waits for it to end.
         flushSave()
         let name = title.trimmingCharacters(in: .whitespaces)
         var meeting = Meeting(title: name.isEmpty ? "Untitled meeting" : name, project: project.trimmingCharacters(in: .whitespaces))
@@ -353,12 +360,14 @@ final class AppState {
         if let trimTo { meeting.duration = min(meeting.duration, max(trimTo, 1)) }
         if let note { meeting.warnings.append(note) }
         meeting.state = warning == nil ? .ready : .interrupted
-        do { try writer.writeNow(meeting, to: locations.manifest(meeting.id)) } catch { errorMessage = error.localizedDescription }
+        var saved = true
+        do { try writer.writeNow(meeting, to: locations.manifest(meeting.id)) } catch { saved = false; errorMessage = error.localizedDescription }
         upsert(meeting)
         route = .meeting(meeting.id)
         onStatusChange?()
+        // Processing reads the saved manifest, so it waits for a save that worked.
         if CaptureProcessing.shouldStart(requested: process ?? (warning == nil), automatic: autoProcess,
-                                         modelsAvailable: hasSpeechModels, chunkCount: meeting.chunks.count) {
+                                         modelsAvailable: hasSpeechModels, chunkCount: meeting.chunks.count, saved: saved) {
             processMeeting(meeting.id)
         }
     }
@@ -486,6 +495,8 @@ final class AppState {
         isWorking = true; busyID = id; progress = message; progressFraction = nil; onStatusChange?()
         operationTask = Task {
             defer { isWorking = false; busyID = nil; progressFraction = nil; operationTask = nil; onStatusChange?() }
+            // An engine test never runs beside processing: stop it and wait for its model to exit first.
+            await finishEngineTest()
             do { try await operation() }
             catch {
                 if error is CancellationError || Task.isCancelled { progress = "Stopped. Saved checkpoints remain available." }

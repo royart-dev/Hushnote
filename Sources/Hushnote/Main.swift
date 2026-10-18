@@ -5,6 +5,15 @@ import HushnoteCore
 import AVFoundation
 import CaptureRing
 
+/// How many model processes this app has running right now.
+func childLlamaCount() -> Int {
+    let pgrep = Process(); pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+    pgrep.arguments = ["-P", String(getpid()), "-f", "llama-completion"]
+    let pipe = Pipe(); pgrep.standardOutput = pipe
+    try? pgrep.run(); pgrep.waitUntilExit()
+    return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n").count
+}
+
 @main
 struct HushnoteMain {
     @MainActor static func main() async {
@@ -26,6 +35,24 @@ struct HushnoteMain {
             catch { print(error.localizedDescription); exit(1) }
             return
         }
+        // Developer check: an engine test must never overlap processing. Start a test, then start an
+        // operation; when the operation begins, no model process may still be running.
+        if args.first == "--overlap-check", args.count == 1 {
+            let state = AppState(forChecks: ())
+            guard state.hasSummaryModel else { print("The bundled summary model is needed for this check."); exit(1) }
+            state.testSummaryEngine()
+            var waited = 0
+            while childLlamaCount() == 0, waited < 60 { try? await Task.sleep(for: .milliseconds(50)); waited += 1 }
+            guard childLlamaCount() == 1 else { print("The engine test didn't start a model process."); exit(1) }
+            var atStart = -1
+            state.perform("probe") { atStart = childLlamaCount() }
+            while state.isWorking { try? await Task.sleep(for: .milliseconds(50)) }
+            guard atStart == 0, !state.engineTesting else {
+                print("An engine test was still running when processing started (\(atStart) model processes)."); exit(1)
+            }
+            print("PASS: processing waits for a running engine test to be cancelled and gone")
+            return
+        }
         // Developer check: two model runs at once (an engine test beside processing). Cancelling one task
         // must stop exactly its own process, and cancelling the other must leave nothing running.
         if args.first == "--cancel-check", args.count == 2 {
@@ -37,13 +64,7 @@ struct HushnoteMain {
                     return LlamaProvider(model: model, directory: folder, useModelTemplate: false, method: "check")
                 }
                 let source = (0..<60).map { "[00:\(String(format: "%02d", $0)):00] Speaker 1: We should review the plan, the budget, the schedule and the open risks again." }.joined(separator: "\n")
-                let running = {
-                    let pgrep = Process(); pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-                    pgrep.arguments = ["-P", String(getpid()), "-f", "llama-completion"]
-                    let pipe = Pipe(); pgrep.standardOutput = pipe
-                    try? pgrep.run(); pgrep.waitUntilExit()
-                    return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n").count
-                }
+                let running = childLlamaCount
                 let first = try make(), second = try make()
                 let a = Task { try await first.generate(source, combine: false) }
                 let b = Task { try await second.generate(source, combine: false) }

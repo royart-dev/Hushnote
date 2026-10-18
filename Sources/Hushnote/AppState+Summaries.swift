@@ -147,6 +147,13 @@ extension AppState {
     /// Cancelling the task ends only the sign-in process; nothing else is touched.
     func cancelChatGPTSignIn() { signInTask?.cancel() }
 
+    /// Stops a running engine test and waits until its model process is gone, so nothing else starts beside it.
+    func finishEngineTest() async {
+        guard let test = engineTestTask else { return }
+        test.cancel()
+        await test.value
+    }
+
     /// Engine checks wait for a quiet moment: not while recording, processing, or already testing.
     var canTestEngine: Bool { !engineTesting && !isRecording && !isStarting && !isWorking }
 
