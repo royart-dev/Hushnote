@@ -110,6 +110,10 @@ Not verified live: notification behaviour in the installed app (banner, buttons,
 - **Processing could overlap an engine test.** Starting a test and then processing left both running, which I reproduced. Processing and recording now cancel a running engine test and wait until its model process has exited before they start. A new `--overlap-check` starts a test, then an operation, and asserts no model process is running when the operation begins: it failed on the code as it stood (1 process still running) and passes after the fix, three runs in a row, with no stray processes afterwards.
 - **A failed final save still allowed processing.** On a normal stop a failed save only set the error message and execution continued into processing, which reads the saved manifest. Processing now requires a successful save; this is a core check (`saved: false` never starts).
 
+### Third review round
+
+A cancelled operation could still start after waiting for an engine test to end (reproduced with `Task.isCancelled == true` inside the operation). `perform` now checks for cancellation after the wait and before starting. `--overlap-check` gained this case: it failed on the code as it stood ("A cancelled operation still started") and passes after the fix, three runs in a row.
+
 ## Still requires a consented live test
 
 No macOS microphone/system-audio permissions were accepted by the agent, and no private meeting was recorded. Start a short test recording in Hushnote, respond to the macOS prompts, play meeting audio, speak briefly, stop and review both tracks. This is needed to verify the actual tap, simultaneous microphone capture, current output device, routing, and permission behavior on this Mac.

@@ -497,7 +497,11 @@ final class AppState {
             defer { isWorking = false; busyID = nil; progressFraction = nil; operationTask = nil; onStatusChange?() }
             // An engine test never runs beside processing: stop it and wait for its model to exit first.
             await finishEngineTest()
-            do { try await operation() }
+            do {
+                // Cancelled while waiting for the test to end: stop here, don't start the operation.
+                try Task.checkCancellation()
+                try await operation()
+            }
             catch {
                 if error is CancellationError || Task.isCancelled { progress = "Stopped. Saved checkpoints remain available." }
                 else { errorMessage = error.localizedDescription; progress = "Needs attention" }

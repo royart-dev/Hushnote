@@ -50,7 +50,16 @@ struct HushnoteMain {
             guard atStart == 0, !state.engineTesting else {
                 print("An engine test was still running when processing started (\(atStart) model processes)."); exit(1)
             }
-            print("PASS: processing waits for a running engine test to be cancelled and gone")
+            // Cancelled while waiting for the test to end: the operation must not start at all.
+            state.testSummaryEngine()
+            waited = 0
+            while childLlamaCount() == 0, waited < 60 { try? await Task.sleep(for: .milliseconds(50)); waited += 1 }
+            var ran = false
+            state.perform("probe") { ran = true }
+            state.cancelWork()
+            while state.isWorking { try? await Task.sleep(for: .milliseconds(50)) }
+            guard !ran else { print("A cancelled operation still started after waiting for the engine test."); exit(1) }
+            print("PASS: processing waits for a running engine test to be cancelled and gone, and a cancelled run never starts")
             return
         }
         // Developer check: two model runs at once (an engine test beside processing). Cancelling one task
